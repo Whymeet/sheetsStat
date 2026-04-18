@@ -1,0 +1,230 @@
+* { box-sizing: border-box; }
+
+:root {
+  --bg: #0f1115;
+  --panel: #181b22;
+  --panel-2: #22262f;
+  --border: #2a2f3a;
+  --text: #e6e6e6;
+  --muted: #8b93a7;
+  --accent: #3da9fc;
+  --accent-hover: #5ab8ff;
+  --danger: #ef4444;
+  --ok: #22c55e;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+nav {
+  display: flex;
+  gap: 4px;
+}
+
+.tab-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s;
+}
+
+.tab-btn:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.tab-btn.active {
+  color: var(--accent);
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+main {
+  padding: 24px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.tab { display: none; }
+.tab.active { display: block; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.card h2 { margin-top: 0; font-size: 16px; font-weight: 600; }
+.card h3 { font-size: 14px; font-weight: 600; color: var(--muted); margin-top: 24px; }
+
+.hidden { display: none !important; }
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.grid.two { grid-template-columns: 1fr 1fr; }
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="date"],
+input[type="number"] {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  transition: border 0.15s;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button.primary, button.secondary, button.danger {
+  border: 1px solid transparent;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+button.primary {
+  background: var(--accent);
+  color: white;
+}
+button.primary:hover { background: var(--accent-hover); }
+button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.secondary {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+button.secondary:hover { background: var(--border); }
+
+button.danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: transparent;
+}
+button.danger:hover { background: rgba(239, 68, 68, 0.1); }
+
+.flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+table th, table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-weight: 400;
+}
+
+table th {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+table tfoot th {
+  font-size: 14px;
+  color: var(--text);
+  text-transform: none;
+  font-weight: 600;
+}
+
+table td.num, table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+table input {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.status {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 8px 0 0 8px;
+}
+.status.ok { color: var(--ok); }
+.status.err { color: var(--danger); }
+
+pre {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  font-family: "SF Mono", Consolas, monospace;
+  color: #d0d7e2;
+}
+
+details summary {
+  cursor: pointer;
+  color: var(--muted);
+  margin-top: 16px;
+  font-size: 13px;
+}
+details[open] summary { color: var(--text); }

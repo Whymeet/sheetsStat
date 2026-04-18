@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sheetsStat</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>sheetsStat</h1>
+  <nav>
+    <button class="tab-btn active" data-tab="report">Отчёт</button>
+    <button class="tab-btn" data-tab="settings">Настройки</button>
+    <button class="tab-btn" data-tab="history">История</button>
+  </nav>
+</header>
+
+<main>
+  <!-- TAB: REPORT -->
+  <section id="tab-report" class="tab active">
+    <div class="card">
+      <h2>Сгенерировать отчёт за день</h2>
+      <form id="report-form" class="grid">
+        <label>Дата
+          <input type="date" id="report-date" required>
+        </label>
+        <label>sub1 / leadstechLabel
+          <input type="text" id="report-sub1" value="kub" required>
+        </label>
+        <button type="submit" class="primary">Сгенерировать</button>
+      </form>
+      <p id="report-status" class="status"></p>
+    </div>
+
+    <div id="report-result" class="card hidden">
+      <h2>Результат</h2>
+      <div id="report-summary"></div>
+
+      <h3>Ads Manager</h3>
+      <table id="cabinets-table">
+        <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
+        <tbody></tbody>
+        <tfoot><tr><th>Total</th><th class="num" id="ads-total">—</th></tr></tfoot>
+      </table>
+
+      <h3>Yandex Direct (с НДС)</h3>
+      <table id="yandex-table">
+        <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
+        <tbody></tbody>
+        <tfoot><tr><th>Total</th><th class="num" id="yandex-total">—</th></tr></tfoot>
+      </table>
+
+      <h3>LeadsTech</h3>
+      <table id="leadstech-table">
+        <tbody>
+          <tr><th>Клики (uniques)</th><td class="num" id="lt-clicks">—</td></tr>
+          <tr><th>Хосты</th><td class="num" id="lt-hosts">—</td></tr>
+          <tr><th>Сумма (sumwebmaster)</th><td class="num" id="lt-sum">—</td></tr>
+          <tr><th>Конверсии / approved / rejected</th><td class="num" id="lt-conv">—</td></tr>
+        </tbody>
+      </table>
+
+      <details>
+        <summary>Сырой JSON</summary>
+        <pre id="report-raw"></pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- TAB: SETTINGS -->
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>Ads Manager</h2>
+      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+        Логин/пароль твоего аккаунта в Ads Manager. sheetsStat авторизуется через
+        <code>/api/auth/login</code>, получает JWT и дёргает расход по кабинетам —
+        никакие VK-токены здесь не хранятся.
+      </p>
+      <div class="grid two">
+        <label>Base URL
+          <input type="text" id="am-base-url" placeholder="https://kybyshka-dev.ru">
+        </label>
+        <label>Username
+          <input type="text" id="am-username" autocomplete="off">
+        </label>
+        <label>Password
+          <input type="password" id="am-password" autocomplete="off">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Yandex Direct (ads_manager_Yandex)</h2>
+      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+        Логин/пароль пользователя в ads_manager_Yandex. sheetsStat авторизуется через
+        <code>/api/auth/login</code> и собирает расход с НДС по всем активным
+        кабинетам этого пользователя.
+      </p>
+      <div class="grid two">
+        <label>Base URL
+          <input type="text" id="yx-base-url" placeholder="https://...">
+        </label>
+        <label>Username
+          <input type="text" id="yx-username" autocomplete="off">
+        </label>
+        <label>Password
+          <input type="password" id="yx-password" autocomplete="off">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>LeadsTech</h2>
+      <div class="grid two">
+        <label>Login
+          <input type="text" id="lt-login" autocomplete="off">
+        </label>
+        <label>Password
+          <input type="password" id="lt-password" autocomplete="off">
+        </label>
+        <label>Base URL
+          <input type="text" id="lt-base-url" value="https://api.leads.tech">
+        </label>
+        <label>Page size
+          <input type="number" id="lt-page-size" value="500" min="1">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <button id="save-config" class="primary">Сохранить настройки</button>
+      <span id="save-status" class="status"></span>
+    </div>
+  </section>
+
+  <!-- TAB: HISTORY -->
+  <section id="tab-history" class="tab">
+    <div class="card">
+      <div class="flex-between">
+        <h2>Сохранённые отчёты</h2>
+        <button id="history-reload" class="secondary">Обновить</button>
+      </div>
+      <table id="history-table">
+        <thead><tr><th>Файл</th><th>Размер</th><th>Время</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <pre id="history-preview" class="hidden"></pre>
+    </div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# --- Testing / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Runtime data / logs / output ---
+data/
+logs/
+output/
+*.log
+leads_stat*.json
+
+# --- Secrets and configs ---
+.env
+*.env
+cfg/*.json
+cfg/*.yaml
+cfg/*.yml
+lt_vk_config.json
+service_account*.json
+*.key
+*.pem
+*.crt
+*.p12
+
+# --- Scratch / local notes ---
+t.txt
+scratch/
+tmp/
+*.bak
+*.swp
+
+# --- IDE / editor / OS ---
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db

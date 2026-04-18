@@ -1,0 +1,21 @@
+services:
+  web:
+    build: .
+    container_name: sheetsstat-web
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      # cfg — конфиг (токены, кабинеты), редактируется через UI и остаётся на хосте
+      - ./cfg:/app/cfg
+      # output — куда сохраняются отчёты
+      - ./output:/app/output
+      # logs — если понадобится файловое логирование
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
