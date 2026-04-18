@@ -51,6 +51,14 @@
         <tfoot><tr><th>Total</th><th class="num" id="yandex-total">—</th></tr></tfoot>
       </table>
 
+      <h3>Yandex Metrika</h3>
+      <table id="metrika-table">
+        <thead>
+          <tr><th>Цель</th><th class="num">Достижения</th><th class="num">Целевые визиты</th><th class="num">CR, %</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
       <h3>LeadsTech</h3>
       <table id="leadstech-table">
         <tbody>
@@ -106,6 +114,30 @@
         </label>
         <label>Password
           <input type="password" id="yx-password" autocomplete="off">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Yandex Metrika</h2>
+      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+        OAuth-токен Яндекса (единый для всех сервисов), ID счётчика и имя цели.
+        sheetsStat дёргает Metrika Reports API напрямую и возвращает
+        «Достижения цели», «Целевые визиты» и «Конверсию» за день.
+      </p>
+      <div class="grid two">
+        <label>OAuth Token
+          <input type="password" id="ym-oauth-token" autocomplete="off" placeholder="y0_Ag...">
+        </label>
+        <label>Counter ID
+          <input type="number" id="ym-counter-id" placeholder="94076940" min="0">
+        </label>
+        <label>Attribution
+          <input type="text" id="ym-attribution" value="LASTSIGN">
+        </label>
+        <label style="grid-column: 1 / -1;">Goals (через запятую, имена из Метрики)
+          <input type="text" id="ym-goals" value="Zayvka"
+                 placeholder="Zayvka, Offer Click, Одобрение, В работе, Отклон">
         </label>
       </div>
     </div>

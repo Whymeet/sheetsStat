@@ -72,10 +72,18 @@ class YandexSettings(BaseModel):
     password: str = ""
 
 
+class YandexMetrikaSettings(BaseModel):
+    oauth_token: str = ""
+    counter_id: int = 0
+    goals: List[str] = Field(default_factory=lambda: ["Zayvka"])
+    attribution: str = "LASTSIGN"
+
+
 class ConfigPayload(BaseModel):
     leadstech: LeadsTechSettings
     ads_manager: AdsManagerSettings = Field(default_factory=AdsManagerSettings)
     yandex: YandexSettings = Field(default_factory=YandexSettings)
+    yandex_metrika: YandexMetrikaSettings = Field(default_factory=YandexMetrikaSettings)
     analysis: Dict[str, Any] = Field(default_factory=lambda: {"lookback_days": 7})
 
 
@@ -111,13 +119,18 @@ def save_config(payload: ConfigPayload):
 
     data = payload.model_dump()
     CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    ym = data.get("yandex_metrika") or {}
     logger.info(
-        "Config saved: LT login=%s, AdsManager base=%s user=%s, Yandex base=%s user=%s",
+        "Config saved: LT login=%s, AdsManager base=%s user=%s, Yandex base=%s user=%s, "
+        "Metrika counter=%s goals=%s token=%s",
         data["leadstech"]["login"],
         data["ads_manager"]["base_url"],
         data["ads_manager"]["username"],
         data.get("yandex", {}).get("base_url", ""),
         data.get("yandex", {}).get("username", ""),
+        ym.get("counter_id", 0),
+        ym.get("goals") or [],
+        "set" if ym.get("oauth_token") else "empty",
     )
     return {"ok": True}
 

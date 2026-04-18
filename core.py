@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 from ads_manager_client import AdsManagerClient, AdsManagerConfig
 from leadstech_client import build_leadstech_client
 from yandex_client import YandexAdsManagerClient, YandexAdsManagerConfig
+from yandex_metrika_client import YandexMetrikaClient, YandexMetrikaConfig
 
 
 logger = logging.getLogger("sheetsstat.core")
@@ -139,6 +140,111 @@ def collect_yandex(
     return result
 
 
+def _parse_goal_names(ym_cfg: Dict[str, Any]) -> List[str]:
+    """Список целей: поддерживаем новый `goals: [..]` и старый `goal_name: ".."`."""
+    raw = ym_cfg.get("goals")
+    if isinstance(raw, str):
+        # На случай если в JSON строка через запятую
+        raw = [s.strip() for s in raw.split(",")]
+    if not raw:
+        single = (ym_cfg.get("goal_name") or "").strip()
+        raw = [single] if single else []
+    # Уникальные непустые, регистр сохраняем (Метрика сверяет case-insensitive у нас)
+    seen: set = set()
+    out: List[str] = []
+    for name in raw:
+        name = (name or "").strip()
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def collect_yandex_metrika(config: Dict[str, Any], day: date) -> Dict[str, Any]:
+    """Забирает у Metrika цифры по целям за день: достижения, целевые визиты, CR.
+
+    Поддерживает список целей `yandex_metrika.goals: [..]`. Для каждой цели
+    отдельная строка в результате — даже если цель не найдена или API упал
+    (тогда 0/0/0 + error).
+    """
+    ym_cfg = config.get("yandex_metrika") or {}
+    token = (ym_cfg.get("oauth_token") or "").strip()
+    counter_id = ym_cfg.get("counter_id")
+    attribution = (ym_cfg.get("attribution") or "LASTSIGN").strip()
+    goal_names = _parse_goal_names(ym_cfg)
+
+    base = {"goals": [], "counter_id": counter_id, "attribution": attribution}
+
+    if not token or not counter_id:
+        return {**base, "errors": [
+            {"error": "yandex_metrika: задайте oauth_token и counter_id во вкладке «Настройки»"}
+        ]}
+    if not goal_names:
+        return {**base, "errors": [{"error": "yandex_metrika: не задан ни один goal_name"}]}
+
+    try:
+        counter_id_int = int(counter_id)
+    except (TypeError, ValueError):
+        return {**base, "errors": [{"error": f"yandex_metrika: counter_id={counter_id!r} не число"}]}
+
+    client = YandexMetrikaClient(YandexMetrikaConfig(
+        oauth_token=token,
+        counter_id=counter_id_int,
+        attribution=attribution,
+    ))
+
+    # Один запрос на справочник целей — дальше по его результатам резолвим имена
+    try:
+        all_goals = client.list_goals()
+    except Exception as e:
+        logger.error("YandexMetrika list_goals error: %s", e, exc_info=True)
+        return {**base, "errors": [{"error": f"list_goals: {e}"}]}
+
+    name_to_id: Dict[str, int] = {}
+    for g in all_goals:
+        n = (g.get("name") or "").strip().lower()
+        try:
+            name_to_id[n] = int(g["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    goals_out: List[Dict[str, Any]] = []
+    for name in goal_names:
+        entry: Dict[str, Any] = {
+            "goal_name": name,
+            "goal_id": None,
+            "reaches": 0,
+            "visits": 0,
+            "conversion_rate": 0.0,
+        }
+        goal_id = name_to_id.get(name.lower())
+        if goal_id is None:
+            entry["error"] = f"цель {name!r} не найдена на счётчике {counter_id_int}"
+            goals_out.append(entry)
+            continue
+
+        entry["goal_id"] = goal_id
+        try:
+            stats = client.get_goal_stats(goal_id, day, day)
+        except Exception as e:
+            logger.error("YandexMetrika stats error (goal=%s): %s", name, e, exc_info=True)
+            entry["error"] = f"goal_stats: {e}"
+            goals_out.append(entry)
+            continue
+
+        entry["reaches"] = _to_int(stats.get("reaches"))
+        entry["visits"] = _to_int(stats.get("visits"))
+        entry["conversion_rate"] = round(_to_float(stats.get("conversion_rate")), 2)
+        goals_out.append(entry)
+
+    return {
+        "goals": goals_out,
+        "counter_id": counter_id_int,
+        "attribution": attribution,
+    }
+
+
 def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]:
     """Агрегат LeadsTech за день по sub1.
 
@@ -175,6 +281,7 @@ def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]
     """Полный отчёт за день: VK (Ads Manager) + Yandex Direct + LeadsTech."""
     ads_manager = collect_ads_manager(config, day, label=sub1)
     yandex = collect_yandex(config, day, label=sub1)
+    yandex_metrika = collect_yandex_metrika(config, day)
     leadstech = collect_leadstech(config, day, sub1)
 
     return {
@@ -185,5 +292,6 @@ def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]
         ),
         "ads_manager": ads_manager,
         "yandex": yandex,
+        "yandex_metrika": yandex_metrika,
         "leadstech": leadstech,
     }

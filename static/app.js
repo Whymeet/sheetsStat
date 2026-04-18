@@ -74,6 +74,31 @@ function renderReport(data) {
   });
   document.getElementById("yandex-total").textContent = fmtMoney(yx.total);
 
+  // Yandex Metrika
+  const ym = data.yandex_metrika || {};
+  const ymTbody = document.querySelector("#metrika-table tbody");
+  ymTbody.innerHTML = "";
+  const goalsArr = Array.isArray(ym.goals) ? ym.goals : [];
+  if (!goalsArr.length) {
+    const err = (ym.errors && ym.errors[0] && ym.errors[0].error) || "нет данных";
+    ymTbody.innerHTML = `<tr><td colspan="4" style="color: var(--muted);">${escapeHtml(err)}</td></tr>`;
+  } else {
+    goalsArr.forEach(g => {
+      const tr = document.createElement("tr");
+      const nameCell = g.error
+        ? `${escapeHtml(g.goal_name)} <span class="status err" style="font-size:11px">${escapeHtml(g.error)}</span>`
+        : escapeHtml(g.goal_name);
+      const crTxt = (g.conversion_rate === null || g.conversion_rate === undefined)
+        ? "—"
+        : Number(g.conversion_rate).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      tr.innerHTML = `<td>${nameCell}</td>
+        <td class="num">${(g.reaches ?? 0).toLocaleString("ru-RU")}</td>
+        <td class="num">${(g.visits ?? 0).toLocaleString("ru-RU")}</td>
+        <td class="num">${crTxt}</td>`;
+      ymTbody.appendChild(tr);
+    });
+  }
+
   // LeadsTech
   const lt = data.leadstech || {};
   document.getElementById("lt-clicks").textContent = (lt.clicks ?? 0).toLocaleString("ru-RU");
@@ -120,6 +145,7 @@ function emptyConfig() {
     leadstech: { base_url: "https://api.leads.tech", login: "", password: "", page_size: 500 },
     ads_manager: { base_url: DEFAULT_ADS_MANAGER_BASE_URL, username: "", password: "" },
     yandex: { base_url: "", username: "", password: "" },
+    yandex_metrika: { oauth_token: "", counter_id: 0, goals: ["Zayvka"], attribution: "LASTSIGN" },
   };
 }
 
@@ -136,6 +162,13 @@ function renderConfig(cfg) {
   document.getElementById("yx-base-url").value = cfg.yandex?.base_url ?? "";
   document.getElementById("yx-username").value = cfg.yandex?.username ?? "";
   document.getElementById("yx-password").value = cfg.yandex?.password ?? "";
+
+  document.getElementById("ym-oauth-token").value = cfg.yandex_metrika?.oauth_token ?? "";
+  document.getElementById("ym-counter-id").value = cfg.yandex_metrika?.counter_id ?? 0;
+  const goalsArr = Array.isArray(cfg.yandex_metrika?.goals) ? cfg.yandex_metrika.goals
+                 : (cfg.yandex_metrika?.goal_name ? [cfg.yandex_metrika.goal_name] : ["Zayvka"]);
+  document.getElementById("ym-goals").value = goalsArr.join(", ");
+  document.getElementById("ym-attribution").value = cfg.yandex_metrika?.attribution ?? "LASTSIGN";
 }
 
 document.getElementById("save-config").addEventListener("click", async () => {
@@ -157,6 +190,13 @@ document.getElementById("save-config").addEventListener("click", async () => {
       base_url: document.getElementById("yx-base-url").value.trim(),
       username: document.getElementById("yx-username").value.trim(),
       password: document.getElementById("yx-password").value,
+    },
+    yandex_metrika: {
+      oauth_token: document.getElementById("ym-oauth-token").value.trim(),
+      counter_id: parseInt(document.getElementById("ym-counter-id").value, 10) || 0,
+      goals: document.getElementById("ym-goals").value
+              .split(",").map(s => s.trim()).filter(Boolean),
+      attribution: document.getElementById("ym-attribution").value.trim() || "LASTSIGN",
     },
     analysis: _cfgState?.analysis || { lookback_days: 7 },
   };
