@@ -194,12 +194,25 @@ def collect_yandex_metrika(config: Dict[str, Any], day: date) -> Dict[str, Any]:
         attribution=attribution,
     ))
 
+    errors: List[Dict[str, str]] = []
+
+    # Общие показатели счётчика (визиты/просмотры/посетители) — дашборд «Общие показатели»
+    try:
+        totals = client.get_counter_totals(day, day)
+    except Exception as e:
+        logger.error("YandexMetrika totals error: %s", e, exc_info=True)
+        totals = {"visits": 0, "pageviews": 0, "users": 0}
+        errors.append({"error": f"counter_totals: {e}"})
+
     # Один запрос на справочник целей — дальше по его результатам резолвим имена
     try:
         all_goals = client.list_goals()
     except Exception as e:
         logger.error("YandexMetrika list_goals error: %s", e, exc_info=True)
-        return {**base, "errors": [{"error": f"list_goals: {e}"}]}
+        return {**base, "visits": _to_int(totals["visits"]),
+                "pageviews": _to_int(totals["pageviews"]),
+                "users": _to_int(totals["users"]),
+                "errors": errors + [{"error": f"list_goals: {e}"}]}
 
     name_to_id: Dict[str, int] = {}
     for g in all_goals:
@@ -238,11 +251,17 @@ def collect_yandex_metrika(config: Dict[str, Any], day: date) -> Dict[str, Any]:
         entry["conversion_rate"] = round(_to_float(stats.get("conversion_rate")), 2)
         goals_out.append(entry)
 
-    return {
+    result: Dict[str, Any] = {
         "goals": goals_out,
         "counter_id": counter_id_int,
         "attribution": attribution,
+        "visits": _to_int(totals["visits"]),
+        "pageviews": _to_int(totals["pageviews"]),
+        "users": _to_int(totals["users"]),
     }
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]:

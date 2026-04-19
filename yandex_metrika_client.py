@@ -94,6 +94,43 @@ class YandexMetrikaClient:
                     continue
         return None
 
+    def get_counter_totals(
+        self,
+        date_from: date,
+        date_to: date,
+    ) -> Dict[str, float]:
+        """Общие показатели счётчика за период: визиты, просмотры, посетители.
+
+        Соответствует дашборду «Общие показатели» в UI Метрики.
+        """
+        params = {
+            "ids": str(self.cfg.counter_id),
+            "metrics": "ym:s:visits,ym:s:pageviews,ym:s:users",
+            "date1": date_from.isoformat(),
+            "date2": date_to.isoformat(),
+            "attribution": self.cfg.attribution,
+            "accuracy": self.cfg.accuracy,
+            "limit": 1,
+        }
+        logger.info(
+            "Metrika: /stat/v1/data totals counter=%s period=%s..%s",
+            self.cfg.counter_id, params["date1"], params["date2"],
+        )
+        payload = self._get("/stat/v1/data", params)
+
+        totals = payload.get("totals") or []
+        row = totals[0] if totals and isinstance(totals[0], list) else totals
+        if len(row) < 3:
+            raise YandexMetrikaError(
+                f"Metrika: неожиданная структура totals (counter-wide) = {totals!r}"
+            )
+        visits, pageviews, users = row[:3]
+        return {
+            "visits": float(visits or 0),
+            "pageviews": float(pageviews or 0),
+            "users": float(users or 0),
+        }
+
     def get_goal_stats(
         self,
         goal_id: int,

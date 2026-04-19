@@ -76,6 +76,10 @@ function renderReport(data) {
 
   // Yandex Metrika
   const ym = data.yandex_metrika || {};
+  const fmtInt = (v) => (v ?? 0).toLocaleString("ru-RU");
+  document.getElementById("ym-visits-total").textContent = fmtInt(ym.visits);
+  document.getElementById("ym-pageviews-total").textContent = fmtInt(ym.pageviews);
+  document.getElementById("ym-users-total").textContent = fmtInt(ym.users);
   const ymTbody = document.querySelector("#metrika-table tbody");
   ymTbody.innerHTML = "";
   const goalsArr = Array.isArray(ym.goals) ? ym.goals : [];
