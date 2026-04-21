@@ -36,6 +36,7 @@
     <div id="report-result" class="card hidden">
       <h2>Результат</h2>
       <div id="report-summary"></div>
+      <div id="report-gs" class="status" style="margin-bottom:8px;"></div>
 
       <h3>Ads Manager</h3>
       <table id="cabinets-table">
@@ -75,6 +76,16 @@
           <tr><th>Конверсии / approved / rejected</th><td class="num" id="lt-conv">—</td></tr>
         </tbody>
       </table>
+
+      <h3>8connect</h3>
+      <table id="eightconnect-table">
+        <tbody>
+          <tr><th>Расход (→ AC)</th><td class="num" id="ec-cost">—</td></tr>
+          <tr><th>Доход (→ AE)</th><td class="num" id="ec-charge">—</td></tr>
+          <tr><th>Scheme IDs</th><td class="num" id="ec-scheme-list">—</td></tr>
+        </tbody>
+      </table>
+      <div id="ec-error" class="status err" style="margin-top:4px;"></div>
 
       <details>
         <summary>Сырой JSON</summary>
@@ -163,6 +174,48 @@
         </label>
         <label>Page size
           <input type="number" id="lt-page-size" value="500" min="1">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>8connect</h2>
+      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+        Логин/пароль 8connect. sheetsStat авторизуется через
+        <code>/api/auth/login</code>, дёргает <code>/api/report/list</code> за день
+        по указанным ID схем и суммирует <b>расход</b> (пишется в колонку AC —
+        слагаемое формулы «Затраты» D) и <b>доход</b> (пишется в AE).
+      </p>
+      <div class="grid two">
+        <label>Login
+          <input type="text" id="ec-login" autocomplete="off">
+        </label>
+        <label>Password
+          <input type="password" id="ec-password" autocomplete="off">
+        </label>
+        <label style="grid-column: 1 / -1;">Scheme IDs (через запятую)
+          <input type="text" id="ec-scheme-ids" value="2260, 2805, 2809, 612"
+                 placeholder="2260, 2805, 2809, 612">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Google Sheets</h2>
+      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+        Запись отчёта в таблицу: фикс. ячейки C/E/F/G/AI по строке даты,
+        расходы кабинетов — в колонки по названию из <code>AR2:CL2</code>,
+        остаток — в <code>A37↓/B37↓</code>. Вкладка выбирается по месяцу
+        («Апрель 26»).
+      </p>
+      <div class="grid two">
+        <label style="grid-column: 1 / -1;">Ссылка на таблицу или Spreadsheet ID
+          <input type="text" id="gs-spreadsheet-id"
+                 placeholder="https://docs.google.com/spreadsheets/d/... или просто ID">
+          <small id="gs-link" style="color: var(--muted); font-size: 12px; margin-top: 4px; display:block;"></small>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="gs-enabled"> Включить запись в Sheets
         </label>
       </div>
     </div>

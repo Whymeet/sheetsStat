@@ -13,6 +13,7 @@ from datetime import date
 from typing import Any, Dict, List
 
 from ads_manager_client import AdsManagerClient, AdsManagerConfig
+from eightconnect_client import build_eightconnect_client
 from leadstech_client import build_leadstech_client
 from yandex_client import YandexAdsManagerClient, YandexAdsManagerConfig
 from yandex_metrika_client import YandexMetrikaClient, YandexMetrikaConfig
@@ -296,14 +297,56 @@ def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str,
     }
 
 
+def collect_eightconnect(config: Dict[str, Any], day: date) -> Dict[str, Any]:
+    """Дневной агрегат 8connect по списку scheme-ID.
+
+    Результат:
+        {"cost": float, "charge": float, "schemes": [...], "errors": [...]}
+    """
+    ec_cfg = config.get("eightconnect") or {}
+    login = (ec_cfg.get("login") or "").strip()
+    password = (ec_cfg.get("password") or "").strip()
+    scheme_ids = ec_cfg.get("scheme_ids") or [2260, 2805, 2809, 612]
+
+    if not login or not password:
+        return {
+            "cost": 0.0,
+            "charge": 0.0,
+            "schemes": [],
+            "scheme_ids": scheme_ids,
+            "errors": [{"error": "eightconnect: задайте login и password во вкладке «Настройки»"}],
+        }
+
+    try:
+        client = build_eightconnect_client(config)
+        raw = client.get_schemes_totals(day, scheme_ids)
+    except Exception as e:
+        logger.error("8connect error: %s", e, exc_info=True)
+        return {
+            "cost": 0.0,
+            "charge": 0.0,
+            "schemes": [],
+            "scheme_ids": scheme_ids,
+            "errors": [{"error": str(e)}],
+        }
+
+    return {
+        "cost": round(_to_float(raw.get("cost")), 2),
+        "charge": round(_to_float(raw.get("charge")), 2),
+        "schemes": raw.get("schemes") or [],
+        "scheme_ids": scheme_ids,
+    }
+
+
 def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]:
-    """Полный отчёт за день: VK (Ads Manager) + Yandex Direct + LeadsTech."""
+    """Полный отчёт за день: VK (Ads Manager) + Yandex Direct + LeadsTech + 8connect."""
     ads_manager = collect_ads_manager(config, day, label=sub1)
     yandex = collect_yandex(config, day, label=sub1)
     yandex_metrika = collect_yandex_metrika(config, day)
     leadstech = collect_leadstech(config, day, sub1)
+    eightconnect = collect_eightconnect(config, day)
 
-    return {
+    result: Dict[str, Any] = {
         "date": day.isoformat(),
         "sub1": sub1,
         "cabinet_count": (
@@ -313,4 +356,17 @@ def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]
         "yandex": yandex,
         "yandex_metrika": yandex_metrika,
         "leadstech": leadstech,
+        "eightconnect": eightconnect,
     }
+
+    # Запись в Google Sheets (опционально, под флагом google_sheets.enabled)
+    try:
+        from sheets_writer import write_daily_report
+        gs_summary = write_daily_report(config, day, result)
+        if gs_summary:
+            result["google_sheets"] = gs_summary
+    except Exception as e:
+        logger.error("Google Sheets write error: %s", e, exc_info=True)
+        result["google_sheets"] = {"enabled": True, "error": str(e)}
+
+    return result

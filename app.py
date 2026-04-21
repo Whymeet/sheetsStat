@@ -22,10 +22,22 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import re
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+_SPREADSHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
+
+
+def _extract_spreadsheet_id(value: str) -> str:
+    """Принимает либо чистый ID, либо полный URL Google Sheets."""
+    value = (value or "").strip()
+    m = _SPREADSHEET_URL_RE.search(value)
+    return m.group(1) if m else value
 
 from config_loader import load_lt_vk_config
 from core import build_report
@@ -79,11 +91,31 @@ class YandexMetrikaSettings(BaseModel):
     attribution: str = "LASTSIGN"
 
 
+class EightConnectSettings(BaseModel):
+    base_url: str = "https://8connect.ru"
+    login: str = ""
+    password: str = ""
+    scheme_ids: List[int] = Field(default_factory=lambda: [2260, 2805, 2809, 612])
+
+
+class GoogleSheetsSettings(BaseModel):
+    enabled: bool = False
+    spreadsheet_id: str = ""
+    service_account_json_path: str = "cfg/service_account.json"
+
+    @field_validator("spreadsheet_id", mode="before")
+    @classmethod
+    def _normalize_spreadsheet_id(cls, v):
+        return _extract_spreadsheet_id(v or "")
+
+
 class ConfigPayload(BaseModel):
     leadstech: LeadsTechSettings
     ads_manager: AdsManagerSettings = Field(default_factory=AdsManagerSettings)
     yandex: YandexSettings = Field(default_factory=YandexSettings)
     yandex_metrika: YandexMetrikaSettings = Field(default_factory=YandexMetrikaSettings)
+    eightconnect: EightConnectSettings = Field(default_factory=EightConnectSettings)
+    google_sheets: GoogleSheetsSettings = Field(default_factory=GoogleSheetsSettings)
     analysis: Dict[str, Any] = Field(default_factory=lambda: {"lookback_days": 7})
 
 
@@ -120,9 +152,12 @@ def save_config(payload: ConfigPayload):
     data = payload.model_dump()
     CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     ym = data.get("yandex_metrika") or {}
+    ec = data.get("eightconnect") or {}
+    gs = data.get("google_sheets") or {}
     logger.info(
         "Config saved: LT login=%s, AdsManager base=%s user=%s, Yandex base=%s user=%s, "
-        "Metrika counter=%s goals=%s token=%s",
+        "Metrika counter=%s goals=%s token=%s, 8connect login=%s schemes=%s, "
+        "Sheets enabled=%s id=%s",
         data["leadstech"]["login"],
         data["ads_manager"]["base_url"],
         data["ads_manager"]["username"],
@@ -131,6 +166,10 @@ def save_config(payload: ConfigPayload):
         ym.get("counter_id", 0),
         ym.get("goals") or [],
         "set" if ym.get("oauth_token") else "empty",
+        ec.get("login") or "",
+        ec.get("scheme_ids") or [],
+        gs.get("enabled", False),
+        gs.get("spreadsheet_id", ""),
     )
     return {"ok": True}
 

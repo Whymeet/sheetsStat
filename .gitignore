@@ -54,9 +54,16 @@ tmp/
 *.bak
 *.swp
 
+# --- 8connect panel (отдельный проект, распакован рядом) ---
+8connect*/
+__MACOSX/
+
 # --- IDE / editor / OS ---
 .vscode/
 .idea/
 *.iml
 .DS_Store
 Thumbs.db
+
+# --- Claude Code local settings ---
+.claude/

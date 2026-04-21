@@ -52,6 +52,24 @@ function renderReport(data) {
       ${data.warning ? `<br><span class="status err">${data.warning}</span>` : ""}
     </div>`;
 
+  const gs = data.google_sheets;
+  const gsEl = document.getElementById("report-gs");
+  if (!gs || gs.enabled === false) {
+    gsEl.textContent = "";
+    gsEl.className = "status";
+  } else if (gs.error) {
+    gsEl.textContent = `Google Sheets: ❌ ${gs.error}`;
+    gsEl.className = "status err";
+  } else {
+    const nMatched = (gs.matched || []).length;
+    const nUnmatched = (gs.unmatched || []).length;
+    const fallbackRange = nUnmatched
+      ? ` · fallback A${gs.unmatched[0].row}…A${gs.unmatched[nUnmatched - 1].row}`
+      : "";
+    gsEl.textContent = `Google Sheets ✅ «${gs.worksheet}», строка ${gs.date_row} · matched ${nMatched}, unmatched ${nUnmatched}${fallbackRange}`;
+    gsEl.className = "status ok";
+  }
+
   // Ads Manager table
   const tbody = document.querySelector("#cabinets-table tbody");
   tbody.innerHTML = "";
@@ -116,6 +134,16 @@ function renderReport(data) {
     convEl.textContent = `${c} / ${a} / ${r}`;
   }
 
+  // 8connect
+  const ec = data.eightconnect || {};
+  document.getElementById("ec-cost").textContent = fmtMoney(ec.cost);
+  document.getElementById("ec-charge").textContent = fmtMoney(ec.charge);
+  const ecSchemes = Array.isArray(ec.scheme_ids) ? ec.scheme_ids : [];
+  document.getElementById("ec-scheme-list").textContent = ecSchemes.length ? ecSchemes.join(", ") : "—";
+  const ecErrEl = document.getElementById("ec-error");
+  const ecErr = (ec.errors && ec.errors[0] && ec.errors[0].error) || "";
+  ecErrEl.textContent = ecErr ? `❌ ${ecErr}` : "";
+
   document.getElementById("report-raw").textContent = JSON.stringify(data, null, 2);
 }
 
@@ -150,6 +178,8 @@ function emptyConfig() {
     ads_manager: { base_url: DEFAULT_ADS_MANAGER_BASE_URL, username: "", password: "" },
     yandex: { base_url: "", username: "", password: "" },
     yandex_metrika: { oauth_token: "", counter_id: 0, goals: ["Zayvka"], attribution: "LASTSIGN" },
+    eightconnect: { base_url: "https://8connect.ru", login: "", password: "", scheme_ids: [2260, 2805, 2809, 612] },
+    google_sheets: { enabled: false, spreadsheet_id: "", service_account_json_path: "cfg/service_account.json" },
   };
 }
 
@@ -173,7 +203,36 @@ function renderConfig(cfg) {
                  : (cfg.yandex_metrika?.goal_name ? [cfg.yandex_metrika.goal_name] : ["Zayvka"]);
   document.getElementById("ym-goals").value = goalsArr.join(", ");
   document.getElementById("ym-attribution").value = cfg.yandex_metrika?.attribution ?? "LASTSIGN";
+
+  document.getElementById("ec-login").value = cfg.eightconnect?.login ?? "";
+  document.getElementById("ec-password").value = cfg.eightconnect?.password ?? "";
+  const schemeIds = Array.isArray(cfg.eightconnect?.scheme_ids) && cfg.eightconnect.scheme_ids.length
+    ? cfg.eightconnect.scheme_ids
+    : [2260, 2805, 2809, 612];
+  document.getElementById("ec-scheme-ids").value = schemeIds.join(", ");
+
+  document.getElementById("gs-spreadsheet-id").value = cfg.google_sheets?.spreadsheet_id ?? "";
+  document.getElementById("gs-enabled").checked = !!cfg.google_sheets?.enabled;
+  renderSheetLink();
 }
+
+function extractSpreadsheetId(v) {
+  const s = (v || "").trim();
+  const m = s.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : s;
+}
+
+function renderSheetLink() {
+  const raw = document.getElementById("gs-spreadsheet-id").value;
+  const id = extractSpreadsheetId(raw);
+  const link = document.getElementById("gs-link");
+  if (!id) { link.textContent = ""; return; }
+  link.innerHTML = `ID: <code>${escapeHtml(id)}</code> — <a href="https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/edit" target="_blank" rel="noopener">открыть</a>`;
+}
+
+document.addEventListener("input", (e) => {
+  if (e.target && e.target.id === "gs-spreadsheet-id") renderSheetLink();
+});
 
 document.getElementById("save-config").addEventListener("click", async () => {
   const status = document.getElementById("save-status");
@@ -201,6 +260,19 @@ document.getElementById("save-config").addEventListener("click", async () => {
       goals: document.getElementById("ym-goals").value
               .split(",").map(s => s.trim()).filter(Boolean),
       attribution: document.getElementById("ym-attribution").value.trim() || "LASTSIGN",
+    },
+    eightconnect: {
+      base_url: _cfgState?.eightconnect?.base_url || "https://8connect.ru",
+      login: document.getElementById("ec-login").value.trim(),
+      password: document.getElementById("ec-password").value,
+      scheme_ids: document.getElementById("ec-scheme-ids").value
+                    .split(",").map(s => parseInt(s.trim(), 10))
+                    .filter(n => Number.isFinite(n) && n > 0),
+    },
+    google_sheets: {
+      enabled: document.getElementById("gs-enabled").checked,
+      spreadsheet_id: extractSpreadsheetId(document.getElementById("gs-spreadsheet-id").value),
+      service_account_json_path: _cfgState?.google_sheets?.service_account_json_path || "cfg/service_account.json",
     },
     analysis: _cfgState?.analysis || { lookback_days: 7 },
   };

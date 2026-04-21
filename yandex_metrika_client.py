@@ -18,9 +18,14 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.exceptions import ConnectionError as ReqConnectionError, SSLError, Timeout
 
 
 logger = logging.getLogger("sheetsstat.yandex_metrika")
+
+
+# Сетевые флейки, на которых имеет смысл ретраить: SSL EOF, обрыв TCP, таймаут.
+_NET_FLAKES = (SSLError, ReqConnectionError, Timeout)
 
 
 @dataclass
@@ -52,8 +57,21 @@ class YandexMetrikaClient:
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = self.BASE + path
         backoff = 1.0
+        last_net_exc: Optional[Exception] = None
         for attempt in range(1, 6):
-            resp = requests.get(url, headers=self._headers(), params=params or {}, timeout=self.timeout)
+            try:
+                resp = requests.get(
+                    url, headers=self._headers(), params=params or {}, timeout=self.timeout,
+                )
+            except _NET_FLAKES as exc:
+                last_net_exc = exc
+                logger.warning(
+                    "Metrika net error на %s (попытка %d/5): %s — sleep %.1fs",
+                    path, attempt, type(exc).__name__, backoff,
+                )
+                time.sleep(backoff)
+                backoff *= 2
+                continue
 
             if resp.status_code in (401, 403):
                 raise YandexMetrikaAuthError(
@@ -75,6 +93,10 @@ class YandexMetrikaClient:
                 )
             return resp.json()
 
+        if last_net_exc is not None:
+            raise YandexMetrikaError(
+                f"Metrika {path}: исчерпаны ретраи по сетевым ошибкам ({type(last_net_exc).__name__}: {last_net_exc})"
+            )
         raise YandexMetrikaError(f"Metrika {path}: исчерпаны ретраи по 429/5xx")
 
     # ------------------------------------------------------------------
