@@ -4,11 +4,16 @@
 («Апрель 26», «Май 26», …). Столбец A — даты `dd.mm.yyyy`.
 
 На строке даты пишем агрегаты в фиксированных колонках:
-    C  — Приход            = leadstech.sum (sumwebmaster)
+    C  — Приход            = формула `=AE{row}+AJ{row}+AF{row}+R{row}`
     E  — Клики ЛТ          = leadstech.clicks
     F  — Метрика визиты    = yandex_metrika.visits
     G  — Заявки с сайта    = visits у цели Zayvka
+    AB — 8connect SMS      = eightconnect.count (кол-во отправленных SMS)
+    AC — 8connect cost     = eightconnect.cost
+    AE — 8connect charge   = eightconnect.charge
+    AF — Клиенты           = всегда 0 (по требованию)
     AI — Переходы уники    = leadstech.hosts
+    AJ — Доход с витрины   = формула `={leadstech.sum}-AE{row}` (sumwebmaster − 8connect charge)
 
 В `AR2:CL2` лежат названия рекламных кабинетов. По каждому spent'у из отчёта
 ищем свою колонку и пишем spent в `{col}{date_row}`. Кабинеты, которых нет
@@ -17,7 +22,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,18 +37,22 @@ RU_MONTHS = [
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
 
-COL_PRIHOD    = "C"
-COL_ZATRATY   = "D"
-COL_CLICKS_LT = "E"
-COL_METRIKA_V = "F"
-COL_ZAYAVKI   = "G"
-COL_PEREHODY  = "AI"
+COL_PRIHOD         = "C"
+COL_ZATRATY        = "D"
+COL_CLICKS_LT      = "E"
+COL_METRIKA_V      = "F"
+COL_ZAYAVKI        = "G"
+COL_PEREHODY       = "AI"
+COL_DOHOD_VITRINA  = "AJ"
 
 # 8connect: расход пишем в AC (уже слагаемое формулы D без коэффициента),
 # доход/приход — в AE. AC входит в ZATRATY_PLAIN_COLS ниже, так что формула
 # в D автоматически подхватит расход 8connect.
-COL_8CONN_COST   = "AC"
-COL_8CONN_CHARGE = "AE"
+# AB — кол-во отправленных SMS (count), AF — кол-во клиентов (client).
+COL_8CONN_COST    = "AC"
+COL_8CONN_CHARGE  = "AE"
+COL_8CONN_COUNT   = "AB"
+COL_8CONN_CLIENTS = "AF"
 
 # Коэффициенты (НДС/комиссии) по колонкам кабинетов для формулы «Затраты».
 # Колонки без коэффициента (AC, BC) — суммируются как есть (множитель 1).
@@ -64,6 +75,15 @@ FALLBACK_NAME_COL    = "A"
 FALLBACK_SPENT_COL   = "B"
 
 TARGET_GOAL_FOR_ZAYAVKI = "Zayvka"
+
+# Строка-эталон формул. Читаем её один раз на вкладку и вставляем все
+# обнаруженные формулы в новую строку даты (с заменой ссылок на строку).
+TEMPLATE_ROW = 33
+_TEMPLATE_RANGE = f"A{TEMPLATE_ROW}:ZZ{TEMPLATE_ROW}"
+# \b нужен, чтобы 33 не цеплялось посреди 330/133, но срабатывало на AR33 / AR$33.
+_TEMPLATE_ROW_RE = re.compile(rf"(\$?[A-Z]+\$?){TEMPLATE_ROW}\b")
+# Кэш формул по title вкладки — один раз на процесс.
+_TEMPLATE_CACHE: Dict[str, Dict[str, str]] = {}
 
 _WS_SPACE_RE = re.compile(r"\s+")
 
@@ -174,6 +194,55 @@ def _collect_cabinets(report: Dict[str, Any]) -> List[Tuple[str, float, str]]:
     return out
 
 
+def _load_template_formulas(ws: Any, title: str) -> Dict[str, str]:
+    """Читает формулы из строки-эталона TEMPLATE_ROW вкладки.
+
+    Возвращает `{col_letter: formula}` только для ячеек, начинающихся с `=`.
+    Результат кэшируется по title вкладки на всё время жизни процесса.
+    """
+    cached = _TEMPLATE_CACHE.get(title)
+    if cached is not None:
+        return cached
+
+    try:
+        rows = ws.get(_TEMPLATE_RANGE, value_render_option="FORMULA")
+    except TypeError:
+        # Совместимость со старыми версиями gspread без kwarg'а.
+        rows = ws.get(_TEMPLATE_RANGE)
+
+    cells = rows[0] if rows else []
+    template: Dict[str, str] = {}
+    for offset, cell in enumerate(cells):
+        if isinstance(cell, str) and cell.startswith("="):
+            template[_col_letter(1 + offset)] = cell
+
+    logger.info(
+        "Sheets/%s: шаблонных формул в строке %d — %d (%s)",
+        title, TEMPLATE_ROW, len(template), ", ".join(sorted(template.keys())) or "—",
+    )
+    _TEMPLATE_CACHE[title] = template
+    return template
+
+
+def _substitute_template_row(formula: str, target_row: int) -> str:
+    """Заменяет в формуле ссылки вида AR33 / $AR$33 на тот же столбец, но с target_row."""
+    return _TEMPLATE_ROW_RE.sub(rf"\g<1>{target_row}", formula)
+
+
+def _build_prihod_formula(row: int) -> str:
+    """Формула C: `=AE{row}+AJ{row}+AF{row}+R{row}`."""
+    return f"={COL_8CONN_CHARGE}{row}+{COL_DOHOD_VITRINA}{row}+AF{row}+R{row}"
+
+
+def _build_dohod_vitrina_formula(row: int, sumwebmaster: float) -> str:
+    """Формула AJ: `={sumwebmaster}-AE{row}` (sumwebmaster − 8connect charge).
+
+    Число форматируем с запятой — таблица в русской локали (USER_ENTERED).
+    """
+    literal = f"{sumwebmaster:.2f}".replace(".", ",")
+    return f"={literal}-{COL_8CONN_CHARGE}{row}"
+
+
 def _build_zatraty_formula(row: int) -> str:
     """Собирает формулу «Затрат» для заданной строки.
 
@@ -193,6 +262,93 @@ def _find_first_empty_fallback_row(ws: Any) -> int:
     while row - 1 < len(values) and (values[row - 1] or "").strip():
         row += 1
     return row
+
+
+def _build_gsheets_spreadsheet(config: Dict[str, Any]) -> Optional[Any]:
+    """Открывает Google Sheets Spreadsheet по конфигу.
+
+    Блок `google_sheets` в `cfg/lt_vk_config.json`:
+
+        "google_sheets": {
+          "enabled": true,
+          "service_account_json_path": "cfg/service_account.json",
+          "spreadsheet_id": "1AbCdEfG..."
+        }
+
+    Возвращает None, если интеграция выключена / неправильно настроена /
+    не удалось достучаться до Google API после ретраев.
+    """
+    gs_cfg = config.get("google_sheets")
+    if not gs_cfg:
+        logger.info(
+            "Google Sheets: блок 'google_sheets' в конфиге не задан — интеграция выключена"
+        )
+        return None
+
+    if not gs_cfg.get("enabled", True):
+        logger.info("Google Sheets: google_sheets.enabled = false — интеграция выключена")
+        return None
+
+    service_account_path = gs_cfg.get("service_account_json_path") or os.getenv(
+        "GOOGLE_SERVICE_ACCOUNT_JSON"
+    )
+    spreadsheet_id = gs_cfg.get("spreadsheet_id") or os.getenv("GOOGLE_SPREADSHEET_ID")
+
+    if not service_account_path or not spreadsheet_id:
+        logger.warning(
+            "Google Sheets: не заданы service_account_json_path или spreadsheet_id — интеграция выключена"
+        )
+        return None
+
+    if not os.path.exists(service_account_path):
+        logger.error(
+            "Google Sheets: файл сервисного аккаунта не найден: %s. "
+            "Проверь google_sheets.service_account_json_path в конфиге.",
+            service_account_path,
+        )
+        return None
+
+    try:
+        import gspread  # type: ignore
+    except ImportError:
+        logger.error(
+            "Google Sheets: не найдена библиотека gspread. "
+            "Установи зависимости: pip install gspread google-auth"
+        )
+        return None
+
+    max_retries = 3
+    retry_delay = 2
+    spreadsheet = None
+    try:
+        for attempt in range(max_retries):
+            try:
+                logger.info("Google Sheets: попытка подключения %d/%d...", attempt + 1, max_retries)
+                gc = gspread.service_account(filename=service_account_path)
+                spreadsheet = gc.open_by_key(spreadsheet_id)
+                break
+            except Exception as retry_exc:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        "Google Sheets: ошибка при подключении (попытка %d): %s",
+                        attempt + 1, retry_exc,
+                    )
+                    logger.info("Повторная попытка через %d секунд...", retry_delay)
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
+    except Exception as exc:
+        logger.error("Google Sheets: не удалось открыть таблицу после %d попыток: %s", max_retries, exc)
+        logger.error("Проверьте:")
+        logger.error("  1. Интернет-соединение")
+        logger.error("  2. Файл service_account.json существует и содержит валидные credentials")
+        logger.error("  3. Service account имеет доступ к таблице с ID: %s", spreadsheet_id)
+        logger.error("  4. Нет блокировки firewall/антивируса для доступа к Google API")
+        return None
+
+    logger.info("Google Sheets: открыт spreadsheet '%s'", spreadsheet.title)
+    return spreadsheet
 
 
 def write_daily_report(
@@ -220,13 +376,7 @@ def write_daily_report(
         return {"enabled": False, "reason": "google_sheets.enabled = false"}
 
     if spreadsheet is None:
-        # Ленивый импорт: хелпер живёт в matcher_main, а туда тянутся тяжёлые
-        # зависимости — импортируем только если запись реально нужна.
-        try:
-            from matcher_main import build_gsheets_spreadsheet
-        except ImportError as e:
-            return {"enabled": True, "error": f"import matcher_main failed: {e}"}
-        spreadsheet = build_gsheets_spreadsheet(config)
+        spreadsheet = _build_gsheets_spreadsheet(config)
         if spreadsheet is None:
             return {"enabled": True, "error": "не удалось открыть spreadsheet (см. логи)"}
 
@@ -248,27 +398,49 @@ def write_daily_report(
     zayavki_visits = _find_goal_visits(ym, TARGET_GOAL_FOR_ZAYAVKI)
 
     fixed = {
-        "prihod":              float(leadstech.get("sum") or 0),
-        "clicks_lt":           int(leadstech.get("clicks") or 0),
-        "metrika_v":           int(ym.get("visits") or 0),
-        "zayavki":             int(zayavki_visits or 0),
-        "perehody":            int(leadstech.get("hosts") or 0),
-        "eightconnect_cost":   round(float(ec.get("cost") or 0), 2),
-        "eightconnect_charge": round(float(ec.get("charge") or 0), 2),
+        "prihod":               float(leadstech.get("sum") or 0),
+        "clicks_lt":            int(leadstech.get("clicks") or 0),
+        "metrika_v":            int(ym.get("visits") or 0),
+        "zayavki":              int(zayavki_visits or 0),
+        "perehody":             int(leadstech.get("hosts") or 0),
+        "eightconnect_cost":    round(float(ec.get("cost") or 0), 2),
+        "eightconnect_charge":  round(float(ec.get("charge") or 0), 2),
+        "eightconnect_count":   int(ec.get("count") or 0),
+        "eightconnect_clients": int(ec.get("clients") or 0),
     }
 
-    batch: List[Dict[str, Any]] = [
-        # AC/AE — сырые значения 8connect; пишем ДО формул в C и D,
-        # чтобы batch_update пересчитал формулы на актуальных числах.
-        {"range": f"{COL_8CONN_COST}{date_row}",  "values": [[fixed["eightconnect_cost"]]]},
-        {"range": f"{COL_8CONN_CHARGE}{date_row}","values": [[fixed["eightconnect_charge"]]]},
-        # C — «Приход» как формула-ссылка на AE (приход 8connect).
-        {"range": f"{COL_PRIHOD}{date_row}",      "values": [[f"={COL_8CONN_CHARGE}{date_row}"]]},
-        {"range": f"{COL_ZATRATY}{date_row}",     "values": [[_build_zatraty_formula(date_row)]]},
-        {"range": f"{COL_CLICKS_LT}{date_row}",   "values": [[fixed["clicks_lt"]]]},
-        {"range": f"{COL_METRIKA_V}{date_row}",   "values": [[fixed["metrika_v"]]]},
-        {"range": f"{COL_ZAYAVKI}{date_row}",     "values": [[fixed["zayavki"]]]},
-        {"range": f"{COL_PEREHODY}{date_row}",    "values": [[fixed["perehody"]]]},
+    # Шаблонные формулы из строки 33 — идут ПЕРВЫМИ; если наша логика пишет
+    # в ту же колонку (C, D, E, F, G, AI, AC, AE, AR..CL), последняя запись в
+    # batch_update перекроет шаблон.
+    try:
+        template = _load_template_formulas(ws, title)
+    except Exception as e:
+        logger.warning("Sheets/%s: не удалось загрузить шаблон строки %d: %s",
+                       title, TEMPLATE_ROW, e)
+        template = {}
+
+    template_batch: List[Dict[str, Any]] = [
+        {"range": f"{col}{date_row}",
+         "values": [[_substitute_template_row(formula, date_row)]]}
+        for col, formula in template.items()
+    ]
+
+    batch: List[Dict[str, Any]] = template_batch + [
+        # AC — слагаемое формулы D; пишем ДО D, чтобы batch_update увидел актуальное значение.
+        {"range": f"{COL_8CONN_COST}{date_row}",     "values": [[fixed["eightconnect_cost"]]]},
+        {"range": f"{COL_8CONN_CHARGE}{date_row}",   "values": [[fixed["eightconnect_charge"]]]},
+        # AB — кол-во SMS, AF — клиенты (по требованию всегда 0).
+        {"range": f"{COL_8CONN_COUNT}{date_row}",    "values": [[fixed["eightconnect_count"]]]},
+        {"range": f"{COL_8CONN_CLIENTS}{date_row}",  "values": [[0]]},
+        # AJ (доход с витрины) = sumwebmaster − AE; пишем ДО C, т.к. C ссылается на AJ.
+        {"range": f"{COL_DOHOD_VITRINA}{date_row}",  "values": [[_build_dohod_vitrina_formula(date_row, fixed["prihod"])]]},
+        # C (Приход) — формула =AE+AJ+AF+R (AF пишется чуть выше).
+        {"range": f"{COL_PRIHOD}{date_row}",         "values": [[_build_prihod_formula(date_row)]]},
+        {"range": f"{COL_ZATRATY}{date_row}",        "values": [[_build_zatraty_formula(date_row)]]},
+        {"range": f"{COL_CLICKS_LT}{date_row}",      "values": [[fixed["clicks_lt"]]]},
+        {"range": f"{COL_METRIKA_V}{date_row}",      "values": [[fixed["metrika_v"]]]},
+        {"range": f"{COL_ZAYAVKI}{date_row}",        "values": [[fixed["zayavki"]]]},
+        {"range": f"{COL_PEREHODY}{date_row}",       "values": [[fixed["perehody"]]]},
     ]
 
     # --- Матчинг кабинетов ---
@@ -314,9 +486,11 @@ def write_daily_report(
         ws.batch_update(batch, value_input_option="USER_ENTERED")
 
     logger.info(
-        "Sheets: %s / row %d — fixed=%s, matched=%d cabs, unmatched=%d (→ A%d↓)",
+        "Sheets: %s / row %d — fixed=%s, matched=%d cabs, unmatched=%d (→ A%d↓), "
+        "template-formulas=%d",
         title, date_row, fixed, len(matched), len(fallback_rows),
         fallback_rows[0]["row"] if fallback_rows else 0,
+        len(template_batch),
     )
 
     return {
@@ -326,4 +500,5 @@ def write_daily_report(
         "fixed": fixed,
         "matched": matched,
         "unmatched": fallback_rows,
+        "template_formulas": len(template_batch),
     }

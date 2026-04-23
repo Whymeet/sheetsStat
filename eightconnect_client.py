@@ -1,16 +1,17 @@
-"""Клиент 8connect для дневных агрегатов по scheme-ID.
+"""Клиент 8connect для дневных агрегатов по категориям.
 
 Используем ровно два endpoint'а веб-панели 8connect:
     POST /api/auth/login        — JWT-авторизация
-    POST /api/report/list       — таблица отчёта, фильтруем по scheme IDs
+    POST /api/report/list       — таблица отчёта, фильтруем по категориям
 
-Ответ /api/report/list — плоский список `[{cost, charge, profit, ...}, ...]`;
-суммируем cost/charge на клиенте.
+Ответ /api/report/list — плоский список `[{cost, charge, client, count, ...}, ...]`;
+суммируем на клиенте cost, charge, client (кол-во клиентов), count (кол-во SMS).
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -21,6 +22,41 @@ from requests.exceptions import ConnectionError, Timeout, RequestException
 
 
 logger = logging.getLogger("sheetsstat.eightconnect")
+
+# Веб-панель 8connect показывает имя схемы в формате "2260: kubyshka-form 12851".
+# В JSON-ответе поле может называться по-разному, а может приходить как такая
+# человеко-строка. Ловим ведущие цифры.
+_SCHEME_ID_RE = re.compile(r"^\s*(\d+)\b")
+
+
+def _extract_scheme_id(row: Dict[str, Any]) -> Optional[int]:
+    """Вытаскиваем scheme-ID из строки отчёта, перебирая возможные ключи.
+
+    Возвращает None для строк без ID (например, итоговой строки или строки
+    с каким-то агрегатом вроде «не число руб.»).
+    """
+    for key in ("scheme_id", "schemes_id", "schemeId", "id"):
+        v = row.get(key)
+        if v is None or v == "":
+            continue
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            continue
+
+    for key in ("schemes", "scheme", "scheme_name", "name"):
+        v = row.get(key)
+        if isinstance(v, (int, float)):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+        if isinstance(v, str):
+            m = _SCHEME_ID_RE.match(v)
+            if m:
+                return int(m.group(1))
+
+    return None
 
 
 @dataclass
@@ -108,28 +144,32 @@ class EightConnectClient:
                         attempt + 1, max_retries + 1, exc, delay,
                     )
                     time.sleep(delay)
-        assert last_exc is not None
-        raise last_exc
+        raise last_exc if last_exc is not None else RuntimeError(
+            "8connect: _request_with_retry вышел из цикла без исключения"
+        )
 
     @staticmethod
     def _build_payload(
         token: str,
         day: date,
         scheme_ids: List[int],
+        category_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """Собираем payload в формате веб-панели 8connect.
 
-        Только два значимых фильтра — дата и scheme; остальные обязаны быть
-        в payload, чтобы сервер корректно распарсил.
+        Фильтруем по `scheme` (пользовательские схемы 1006/2260/...), при
+        необходимости дополнительно по `category`. Остальные фильтры обязаны
+        присутствовать, иначе API 400.
         """
         date_str = day.strftime("%Y-%m-%d")
+        category_ids = list(category_ids or [])
         filters = [
             {"value": [f"{date_str} 00:00:00", f"{date_str} 23:59:59"],
              "name": "Дата создания", "key": "date"},
             {"value": "",  "name": "Источник",     "key": "utm"},
             {"value": "",  "name": "Саб",           "key": "sub"},
-            {"value": [],  "name": "Категория",     "key": "category"},
-            {"value": [int(s) for s in scheme_ids], "name": "Схема", "key": "scheme"},
+            {"value": [int(c) for c in category_ids], "name": "Категория", "key": "category"},
+            {"value": [int(s) for s in scheme_ids],   "name": "Схема",     "key": "scheme"},
             {"value": [],  "name": "Оффер",         "key": "offers"},
             {"value": [],  "name": "Шаблоны",       "key": "templates"},
             {"value": [],  "name": "Операторы",     "key": "operators"},
@@ -140,6 +180,7 @@ class EightConnectClient:
             {"value": [],  "name": "SCORE 5 RM2",                  "key": "rm_score_2_1f"},
             {"value": [],  "name": "SCORE 6 Resp_sms",             "key": "response_sms"},
             {"value": [],  "name": "SCORE 7 - GL MFO",             "key": "score2"},
+            {"value": [],  "name": "SCORE 9 - 8conn_def",          "key": "response_8conn_def"},
             {"value": "",  "name": "UTM Source",   "key": "UtmSource"},
             {"value": "",  "name": "UTM Medium",   "key": "UtmMedium"},
             {"value": "",  "name": "UTM Campaign", "key": "UtmCampaign"},
@@ -173,53 +214,78 @@ class EightConnectClient:
 
         return data
 
-    def get_schemes_totals(
+    def get_totals(
         self,
         day: date,
         scheme_ids: List[int],
+        category_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
-        """Забираем список по scheme-ID и суммируем cost/charge.
+        """Забираем список и суммируем по всем строкам, отфильтрованным API.
+
+        Фильтр по API: `scheme` = scheme_ids (обязательно), `category`
+        = category_ids (опционально). Клиент суммирует все строки, которые
+        сервер вернул — веб-панель показывает так же.
+
+        Суммируем: cost, charge, client (кол-во клиентов), count (кол-во SMS).
 
         Один retry при `auth_error`/`false` — с перелогином, на случай если
         токен протух.
         """
-        if not scheme_ids:
-            return {"cost": 0.0, "charge": 0.0, "schemes": [], "raw": []}
+        scheme_ids = [int(s) for s in (scheme_ids or [])]
+        category_ids = list(category_ids or [])
 
         token = self._get_token()
-        payload = self._build_payload(token, day, scheme_ids)
+        payload = self._build_payload(token, day, scheme_ids, category_ids)
 
         try:
             rows = self._post_report_list(payload)
         except EightConnectAuthError:
             logger.info("8connect: перелогин (сессия протухла), повтор запроса")
             token = self._get_token(force_refresh=True)
-            payload = self._build_payload(token, day, scheme_ids)
+            payload = self._build_payload(token, day, scheme_ids, category_ids)
             rows = self._post_report_list(payload)
 
-        cost = sum(_to_float(r.get("cost")) for r in rows)
-        charge = sum(_to_float(r.get("charge")) for r in rows)
+        per_row: List[Dict[str, Any]] = []
+        cost_sum = 0.0
+        charge_sum = 0.0
+        clients_sum = 0
+        count_sum = 0
 
-        schemes: List[Dict[str, Any]] = []
         for r in rows:
-            schemes.append({
-                "scheme_id": _to_int(r.get("schemes") or r.get("scheme_id") or r.get("scheme")),
-                "cost": round(_to_float(r.get("cost")), 2),
-                "charge": round(_to_float(r.get("charge")), 2),
-                "profit": round(_to_float(r.get("profit")), 2),
-                "roi": round(_to_float(r.get("roi")), 2),
-                "count": _to_int(r.get("count")),
+            sid = _extract_scheme_id(r)
+            row_cost = _to_float(r.get("cost"))
+            row_charge = _to_float(r.get("charge"))
+            row_clients = _to_int(r.get("client"))
+            row_count = _to_int(r.get("count"))
+
+            cost_sum += row_cost
+            charge_sum += row_charge
+            clients_sum += row_clients
+            count_sum += row_count
+
+            per_row.append({
+                "scheme_id": sid,
+                "scheme_name": r.get("scheme_name"),
+                "cost": round(row_cost, 2),
+                "charge": round(row_charge, 2),
+                "clients": row_clients,
+                "count": row_count,
             })
 
         logger.info(
-            "8connect: day=%s schemes=%s → cost=%.2f charge=%.2f (строк: %d)",
-            day, scheme_ids, cost, charge, len(rows),
+            "8connect: day=%s schemes=%s categories=%s → %d строк, "
+            "cost=%.2f charge=%.2f clients=%d count=%d",
+            day, scheme_ids, category_ids, len(rows),
+            cost_sum, charge_sum, clients_sum, count_sum,
         )
 
         return {
-            "cost": round(cost, 2),
-            "charge": round(charge, 2),
-            "schemes": schemes,
+            "cost": round(cost_sum, 2),
+            "charge": round(charge_sum, 2),
+            "clients": clients_sum,
+            "count": count_sum,
+            "schemes": per_row,
+            "rows_received": len(rows),
             "raw": rows,
         }
 

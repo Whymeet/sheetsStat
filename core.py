@@ -7,14 +7,17 @@ LeadsTech — отдельный внешний сервис, логин/пар�
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import date
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from ads_manager_client import AdsManagerClient, AdsManagerConfig
 from eightconnect_client import build_eightconnect_client
 from leadstech_client import build_leadstech_client
+from sheets_writer import write_daily_report
 from yandex_client import YandexAdsManagerClient, YandexAdsManagerConfig
 from yandex_metrika_client import YandexMetrikaClient, YandexMetrikaConfig
 
@@ -24,6 +27,8 @@ logger = logging.getLogger("sheetsstat.core")
 # sheetsStat и Ads Manager (vktest2) живут на одном домене — дефолтный URL прод.
 # Можно переопределить через env ADS_MANAGER_BASE_URL (например локально для dev).
 DEFAULT_ADS_MANAGER_BASE_URL = os.getenv("ADS_MANAGER_BASE_URL", "https://kybyshka-dev.ru")
+
+_UNSET: Any = object()
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -40,105 +45,105 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _collect_ads_stats(
+    section: str,
+    section_cfg: Dict[str, Any],
+    day: date,
+    *,
+    client_factory,
+    missing_creds_msg: str,
+    log_prefix: str,
+    label: Optional[str] = None,
+    require_base_url: bool = False,
+    server_label_override: Any = _UNSET,
+) -> Dict[str, Any]:
+    """Общий цикл сбора дневных расходов из Ads Manager-подобного API.
+
+    VK и Yandex ходят в одинаковый endpoint `/api/telegram/daily-stats` с
+    одинаковой формой ответа — тело обработки отличается только тем,
+    прокидывается ли `label` в запрос и какое поле попадает в
+    `server_label` результата.
+
+    Возвращает унифицированный словарь:
+        {"cabinets": {...}, "total": float, "server_date": ..., "errors": [...]}
+    плюс `server_label`, если передан или получен с сервера.
+    """
+    base_url = (section_cfg.get("base_url") or "").strip()
+    if not base_url and not require_base_url:
+        base_url = DEFAULT_ADS_MANAGER_BASE_URL
+    username = section_cfg.get("username")
+    password = section_cfg.get("password")
+
+    if not username or not password or (require_base_url and not base_url):
+        return {
+            "cabinets": {},
+            "total": 0.0,
+            "errors": [{"error": missing_creds_msg}],
+        }
+
+    client = client_factory(base_url, username, password)
+
+    try:
+        raw = client.get_daily_stats(day, label=label) if label is not None else client.get_daily_stats(day)
+    except Exception as e:
+        logger.error("%s error: %s", log_prefix, e, exc_info=True)
+        return {"cabinets": {}, "total": 0.0, "errors": [{"error": str(e)}]}
+
+    per_cabinet: Dict[str, Any] = {}
+    errors: List[Dict[str, str]] = []
+    for acc in raw.get("accounts", []):
+        name = acc.get("account_name") or f"<id={acc.get('account_id')}>"
+        per_cabinet[name] = acc.get("spent")
+        if acc.get("error"):
+            errors.append({"cabinet": name, "error": acc["error"]})
+
+    result: Dict[str, Any] = {
+        "cabinets": per_cabinet,
+        "total": round(_to_float(raw.get("total_spent")), 2),
+        "server_date": raw.get("date"),
+    }
+    if server_label_override is not _UNSET:
+        result["server_label"] = server_label_override
+    else:
+        result["server_label"] = raw.get("label")
+    if errors:
+        result["errors"] = errors
+    return result
+
+
 def collect_ads_manager(
     config: Dict[str, Any],
     day: date,
     label: str,
 ) -> Dict[str, Any]:
-    """
-    Идём в Ads Manager `/api/telegram/daily-stats?date=...&label=...`,
-    получаем список кабинетов пользователя и расход за день, плюс total.
-    """
-    am_cfg = config.get("ads_manager") or {}
-    base_url = (am_cfg.get("base_url") or "").strip() or DEFAULT_ADS_MANAGER_BASE_URL
-    username = am_cfg.get("username")
-    password = am_cfg.get("password")
-
-    if not username or not password:
-        return {
-            "cabinets": {},
-            "total": 0.0,
-            "errors": [{"error": "ads_manager: нужно задать username и password (зайди во вкладку «Настройки»)"}],
-        }
-
-    client = AdsManagerClient(AdsManagerConfig(
-        base_url=base_url, username=username, password=password,
-    ))
-
-    try:
-        raw = client.get_daily_stats(day, label=label)
-    except Exception as e:
-        logger.error("AdsManager error: %s", e, exc_info=True)
-        return {"cabinets": {}, "total": 0.0, "errors": [{"error": str(e)}]}
-
-    per_cabinet: Dict[str, Any] = {}
-    errors: List[Dict[str, str]] = []
-    for acc in raw.get("accounts", []):
-        name = acc.get("account_name") or f"<id={acc.get('account_id')}>"
-        per_cabinet[name] = acc.get("spent")
-        if acc.get("error"):
-            errors.append({"cabinet": name, "error": acc["error"]})
-
-    result: Dict[str, Any] = {
-        "cabinets": per_cabinet,
-        "total": round(_to_float(raw.get("total_spent")), 2),
-        "server_date": raw.get("date"),
-        "server_label": raw.get("label"),
-    }
-    if errors:
-        result["errors"] = errors
-    return result
+    """Расход VK Ads за день по label (sub1) через Ads Manager."""
+    return _collect_ads_stats(
+        section="ads_manager",
+        section_cfg=config.get("ads_manager") or {},
+        day=day,
+        client_factory=lambda base, user, pwd: AdsManagerClient(
+            AdsManagerConfig(base_url=base, username=user, password=pwd)
+        ),
+        missing_creds_msg="ads_manager: нужно задать username и password (зайди во вкладку «Настройки»)",
+        log_prefix="AdsManager",
+        label=label,
+    )
 
 
-def collect_yandex(
-    config: Dict[str, Any],
-    day: date,
-    label: str,
-) -> Dict[str, Any]:
-    """
-    Идём в ads_manager_Yandex `/api/telegram/daily-stats?date=...`,
-    получаем расход с НДС по всем активным кабинетам Yandex Direct
-    у указанного пользователя.
-    """
-    y_cfg = config.get("yandex") or {}
-    base_url = (y_cfg.get("base_url") or "").strip()
-    username = y_cfg.get("username")
-    password = y_cfg.get("password")
-
-    if not base_url or not username or not password:
-        return {
-            "cabinets": {},
-            "total": 0.0,
-            "errors": [{"error": "yandex: задайте base_url, username и password во вкладке «Настройки»"}],
-        }
-
-    client = YandexAdsManagerClient(YandexAdsManagerConfig(
-        base_url=base_url, username=username, password=password,
-    ))
-
-    try:
-        raw = client.get_daily_stats(day)
-    except Exception as e:
-        logger.error("YandexAdsManager error: %s", e, exc_info=True)
-        return {"cabinets": {}, "total": 0.0, "errors": [{"error": str(e)}]}
-
-    per_cabinet: Dict[str, Any] = {}
-    errors: List[Dict[str, str]] = []
-    for acc in raw.get("accounts", []):
-        name = acc.get("account_name") or f"<id={acc.get('account_id')}>"
-        per_cabinet[name] = acc.get("spent")
-        if acc.get("error"):
-            errors.append({"cabinet": name, "error": acc["error"]})
-
-    result: Dict[str, Any] = {
-        "cabinets": per_cabinet,
-        "total": round(_to_float(raw.get("total_spent")), 2),
-        "server_date": raw.get("date"),
-        "server_label": label,
-    }
-    if errors:
-        result["errors"] = errors
-    return result
+def collect_yandex(config: Dict[str, Any], day: date) -> Dict[str, Any]:
+    """Расход Yandex Direct за день по всем активным кабинетам пользователя."""
+    return _collect_ads_stats(
+        section="yandex",
+        section_cfg=config.get("yandex") or {},
+        day=day,
+        client_factory=lambda base, user, pwd: YandexAdsManagerClient(
+            YandexAdsManagerConfig(base_url=base, username=user, password=pwd)
+        ),
+        missing_creds_msg="yandex: задайте base_url, username и password во вкладке «Настройки»",
+        log_prefix="YandexAdsManager",
+        require_base_url=True,
+        server_label_override=None,
+    )
 
 
 def _parse_goal_names(ym_cfg: Dict[str, Any]) -> List[str]:
@@ -297,51 +302,90 @@ def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str,
     }
 
 
+_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+
+
+def _save_eightconnect_raw(day: date, raw_rows: List[Dict[str, Any]]) -> None:
+    """Кладём сырой ответ 8connect в output/8connect_{date}.json для дебага."""
+    try:
+        _OUTPUT_DIR.mkdir(exist_ok=True)
+        path = _OUTPUT_DIR / f"8connect_{day.isoformat()}.json"
+        path.write_text(
+            json.dumps(raw_rows, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("8connect: сырой ответ сохранён в %s", path)
+    except Exception as e:
+        logger.warning("8connect: не удалось сохранить сырой ответ: %s", e)
+
+
 def collect_eightconnect(config: Dict[str, Any], day: date) -> Dict[str, Any]:
-    """Дневной агрегат 8connect по списку scheme-ID.
+    """Дневной агрегат 8connect по списку схем.
+
+    Фильтр на API: `scheme` = scheme_ids (обязательно), `category`
+    = category_ids (опционально, по умолчанию пусто). Все строки,
+    возвращённые API, суммируются: cost, charge, clients, count.
+    Сырой ответ сохраняется в `output/8connect_{date}.json`.
 
     Результат:
-        {"cost": float, "charge": float, "schemes": [...], "errors": [...]}
+        {"cost": float, "charge": float, "clients": int, "count": int,
+         "schemes": [...], "scheme_ids": [...], "category_ids": [...],
+         "errors": [...] (опционально)}
     """
     ec_cfg = config.get("eightconnect") or {}
     login = (ec_cfg.get("login") or "").strip()
     password = (ec_cfg.get("password") or "").strip()
-    scheme_ids = ec_cfg.get("scheme_ids") or [2260, 2805, 2809, 612]
+    scheme_ids = ec_cfg.get("scheme_ids") or [1006, 2260, 2805, 2809, 612]
+    category_ids = ec_cfg.get("category_ids") or []
 
     if not login or not password:
         return {
             "cost": 0.0,
             "charge": 0.0,
+            "clients": 0,
+            "count": 0,
             "schemes": [],
             "scheme_ids": scheme_ids,
+            "category_ids": category_ids,
             "errors": [{"error": "eightconnect: задайте login и password во вкладке «Настройки»"}],
         }
 
     try:
         client = build_eightconnect_client(config)
-        raw = client.get_schemes_totals(day, scheme_ids)
+        raw = client.get_totals(day, scheme_ids, category_ids)
     except Exception as e:
         logger.error("8connect error: %s", e, exc_info=True)
         return {
             "cost": 0.0,
             "charge": 0.0,
+            "clients": 0,
+            "count": 0,
             "schemes": [],
             "scheme_ids": scheme_ids,
+            "category_ids": category_ids,
             "errors": [{"error": str(e)}],
         }
+
+    raw_rows = raw.get("raw") or []
+    if raw_rows:
+        _save_eightconnect_raw(day, raw_rows)
 
     return {
         "cost": round(_to_float(raw.get("cost")), 2),
         "charge": round(_to_float(raw.get("charge")), 2),
+        "clients": _to_int(raw.get("clients")),
+        "count": _to_int(raw.get("count")),
         "schemes": raw.get("schemes") or [],
         "scheme_ids": scheme_ids,
+        "category_ids": category_ids,
+        "rows_received": raw.get("rows_received", 0),
     }
 
 
 def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]:
     """Полный отчёт за день: VK (Ads Manager) + Yandex Direct + LeadsTech + 8connect."""
     ads_manager = collect_ads_manager(config, day, label=sub1)
-    yandex = collect_yandex(config, day, label=sub1)
+    yandex = collect_yandex(config, day)
     yandex_metrika = collect_yandex_metrika(config, day)
     leadstech = collect_leadstech(config, day, sub1)
     eightconnect = collect_eightconnect(config, day)
@@ -361,7 +405,6 @@ def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]
 
     # Запись в Google Sheets (опционально, под флагом google_sheets.enabled)
     try:
-        from sheets_writer import write_daily_report
         gs_summary = write_daily_report(config, day, result)
         if gs_summary:
             result["google_sheets"] = gs_summary

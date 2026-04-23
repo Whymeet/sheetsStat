@@ -178,8 +178,11 @@ function emptyConfig() {
     ads_manager: { base_url: DEFAULT_ADS_MANAGER_BASE_URL, username: "", password: "" },
     yandex: { base_url: "", username: "", password: "" },
     yandex_metrika: { oauth_token: "", counter_id: 0, goals: ["Zayvka"], attribution: "LASTSIGN" },
-    eightconnect: { base_url: "https://8connect.ru", login: "", password: "", scheme_ids: [2260, 2805, 2809, 612] },
+    eightconnect: { base_url: "https://8connect.ru", login: "", password: "",
+                    category_ids: [149, 395, 620, 624],
+                    scheme_ids: [1006, 2260, 2805, 2809, 612] },
     google_sheets: { enabled: false, spreadsheet_id: "", service_account_json_path: "cfg/service_account.json" },
+    schedule: { enabled: false, time: "09:00", sub1: "kub" },
   };
 }
 
@@ -206,15 +209,80 @@ function renderConfig(cfg) {
 
   document.getElementById("ec-login").value = cfg.eightconnect?.login ?? "";
   document.getElementById("ec-password").value = cfg.eightconnect?.password ?? "";
+  const categoryIds = Array.isArray(cfg.eightconnect?.category_ids) && cfg.eightconnect.category_ids.length
+    ? cfg.eightconnect.category_ids
+    : [149, 395, 620, 624];
+  document.getElementById("ec-category-ids").value = categoryIds.join(", ");
   const schemeIds = Array.isArray(cfg.eightconnect?.scheme_ids) && cfg.eightconnect.scheme_ids.length
     ? cfg.eightconnect.scheme_ids
-    : [2260, 2805, 2809, 612];
+    : [1006, 2260, 2805, 2809, 612];
   document.getElementById("ec-scheme-ids").value = schemeIds.join(", ");
 
   document.getElementById("gs-spreadsheet-id").value = cfg.google_sheets?.spreadsheet_id ?? "";
   document.getElementById("gs-enabled").checked = !!cfg.google_sheets?.enabled;
   renderSheetLink();
+
+  document.getElementById("sched-enabled").checked = !!cfg.schedule?.enabled;
+  document.getElementById("sched-time").value = cfg.schedule?.time || "09:00";
+  document.getElementById("sched-sub1").value = cfg.schedule?.sub1 || "kub";
+  loadScheduleStatus();
 }
+
+async function loadScheduleStatus() {
+  const el = document.getElementById("sched-status");
+  try {
+    const r = await fetch("/api/schedule");
+    const s = await r.json();
+    if (!s.enabled) {
+      el.textContent = "Планировщик выключен.";
+      el.className = "status";
+    } else {
+      const next = s.next_run ? s.next_run.replace("T", " ") : "—";
+      let txt = `✅ Активен. Следующий запуск: ${next} (Samara)`;
+      if (s.last_run) {
+        const lr = s.last_run;
+        const when = (lr.finished_at || lr.started_at || "").replace("T", " ");
+        if (lr.ok) {
+          txt += ` · последний: ${when} → ${lr.saved_to || "ok"}`;
+        } else {
+          txt += ` · последний упал: ${when} (${lr.error || "см. логи"})`;
+        }
+      }
+      el.textContent = txt;
+      el.className = "status ok";
+    }
+  } catch (e) {
+    el.textContent = "Не удалось получить статус планировщика";
+    el.className = "status err";
+  }
+}
+
+document.getElementById("sched-run-now").addEventListener("click", async () => {
+  const status = document.getElementById("sched-run-status");
+  const sub1 = document.getElementById("sched-sub1").value.trim() || "kub";
+  status.textContent = "Запускаю…";
+  status.className = "status";
+  try {
+    const r = await fetch("/api/schedule/run-now", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sub1 }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+    if (data.ok) {
+      status.textContent = `✅ Готово: ${data.date}_${data.sub1}.json`;
+      status.className = "status ok";
+    } else {
+      status.textContent = "❌ " + (data.error || "ошибка");
+      status.className = "status err";
+    }
+    loadScheduleStatus();
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+});
 
 function extractSpreadsheetId(v) {
   const s = (v || "").trim();
@@ -265,6 +333,9 @@ document.getElementById("save-config").addEventListener("click", async () => {
       base_url: _cfgState?.eightconnect?.base_url || "https://8connect.ru",
       login: document.getElementById("ec-login").value.trim(),
       password: document.getElementById("ec-password").value,
+      category_ids: document.getElementById("ec-category-ids").value
+                      .split(",").map(s => parseInt(s.trim(), 10))
+                      .filter(n => Number.isFinite(n) && n > 0),
       scheme_ids: document.getElementById("ec-scheme-ids").value
                     .split(",").map(s => parseInt(s.trim(), 10))
                     .filter(n => Number.isFinite(n) && n > 0),
@@ -273,6 +344,11 @@ document.getElementById("save-config").addEventListener("click", async () => {
       enabled: document.getElementById("gs-enabled").checked,
       spreadsheet_id: extractSpreadsheetId(document.getElementById("gs-spreadsheet-id").value),
       service_account_json_path: _cfgState?.google_sheets?.service_account_json_path || "cfg/service_account.json",
+    },
+    schedule: {
+      enabled: document.getElementById("sched-enabled").checked,
+      time: document.getElementById("sched-time").value.trim() || "09:00",
+      sub1: document.getElementById("sched-sub1").value.trim() || "kub",
     },
     analysis: _cfgState?.analysis || { lookback_days: 7 },
   };
@@ -291,6 +367,7 @@ document.getElementById("save-config").addEventListener("click", async () => {
     status.textContent = "✅ Сохранено";
     status.className = "status ok";
     _cfgState = payload;
+    loadScheduleStatus();
   } catch (e) {
     status.textContent = "❌ " + e.message;
     status.className = "status err";

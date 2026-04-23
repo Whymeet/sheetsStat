@@ -44,8 +44,8 @@ def main() -> int:
 
     if report["cabinet_count"] == 0:
         logger.error(
-            "В конфиге нет ни одного кабинета с leadstechLabel=%r. Доступные: %s",
-            args.sub1, report.get("available_labels", []),
+            "Нет ни одного кабинета с label=%r в Ads Manager / Yandex.",
+            args.sub1,
         )
         return 2
 

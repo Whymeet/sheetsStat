@@ -193,11 +193,38 @@
         <label>Password
           <input type="password" id="ec-password" autocomplete="off">
         </label>
-        <label style="grid-column: 1 / -1;">Scheme IDs (через запятую)
-          <input type="text" id="ec-scheme-ids" value="2260, 2805, 2809, 612"
-                 placeholder="2260, 2805, 2809, 612">
+        <label style="grid-column: 1 / -1;">Category IDs (фильтр на API, через запятую)
+          <input type="text" id="ec-category-ids" value="149, 395, 620, 624"
+                 placeholder="149, 395, 620, 624">
+        </label>
+        <label style="grid-column: 1 / -1;">Scheme IDs (клиентский фильтр, через запятую)
+          <input type="text" id="ec-scheme-ids" value="1006, 2260, 2805, 2809, 612"
+                 placeholder="1006, 2260, 2805, 2809, 612">
         </label>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Планировщик</h2>
+      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+        Автоматически собирать отчёт за предыдущий день в указанное время по Самаре
+        (UTC+4) и писать в <code>output/</code> + Google Sheets. Повторный запуск в ту же
+        дату перезаписывает данные.
+      </p>
+      <div class="grid two">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="sched-enabled"> Включить автозапуск
+        </label>
+        <label>Время (HH:MM, Samara)
+          <input type="text" id="sched-time" value="09:00" placeholder="09:00">
+        </label>
+        <label>sub1
+          <input type="text" id="sched-sub1" value="kub" placeholder="kub">
+        </label>
+      </div>
+      <p id="sched-status" class="status" style="margin-top:10px;"></p>
+      <button id="sched-run-now" class="secondary" type="button">Запустить за вчера сейчас</button>
+      <span id="sched-run-status" class="status"></span>
     </div>
 
     <div class="card">
