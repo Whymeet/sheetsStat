@@ -55,10 +55,10 @@ COL_8CONN_COUNT   = "AB"
 COL_8CONN_CLIENTS = "AF"
 
 # Коэффициенты (НДС/комиссии) по колонкам кабинетов для формулы «Затраты».
-# Колонки без коэффициента (AC, BC) — суммируются как есть (множитель 1).
+# Колонки без коэффициента (AC, AX, BC) — суммируются как есть (множитель 1).
 ZATRATY_COEFFS: Dict[str, float] = {
-    "AR": 1.062, "AS": 1.16,  "AT": 1.16,  "AU": 0.99,  "AV": 1.048,
-    "AW": 0.99,  "AX": 0.9,   "AY": 1.048, "AZ": 1.16,  "BA": 0.972,
+    "AR": 0.954, "AS": 1.16,  "AT": 1.16,  "AU": 0.99,  "AV": 1.048,
+    "AW": 0.99,               "AY": 1.048, "AZ": 1.16,  "BA": 0.972,
     "BB": 0.99,  "BD": 1.16,  "BE": 0.99,  "BF": 0.99,  "BG": 1.048,
     "BH": 1.16,  "BJ": 0.9,   "BK": 0.9,   "BL": 0.9,   "BM": 0.9,
     "BN": 0.99,  "BO": 0.99,  "BP": 0.99,  "BQ": 0.99,  "BR": 0.99,
@@ -67,7 +67,7 @@ ZATRATY_COEFFS: Dict[str, float] = {
     "CC": 0.954, "CD": 0.954, "CE": 0.954, "CF": 0.954, "CG": 1.048,
     "CH": 1.048, "CI": 1.16,  "CJ": 1.048, "CK": 1.16,  "CL": 1.16,
 }
-ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC", "BC")
+ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC", "AX", "BC")
 
 CABINET_HEADER_RANGE = "AR2:EZ2"
 FALLBACK_START_ROW   = 37
@@ -454,7 +454,12 @@ def write_daily_report(
             continue
         headers_map.setdefault(norm, _col_letter(start_col_idx + offset))
 
+    logger.info("Sheets: заголовки шапки (%d): %s", len(headers_map),
+                {v: k for k, v in list(headers_map.items())})
+
     cabinets = _collect_cabinets(report)
+    logger.info("Sheets: кабинеты из отчёта (%d): %s", len(cabinets),
+                [(n, s) for n, _, s in cabinets])
 
     # Суммируем spent по тем отчётным именам, которые матчатся в ту же колонку
     by_col_spent: Dict[str, float] = {}
