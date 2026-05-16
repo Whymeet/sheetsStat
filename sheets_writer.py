@@ -66,6 +66,7 @@ ZATRATY_COEFFS: Dict[str, float] = {
     "BX": 0.954, "BY": 0.954, "BZ": 1.048, "CA": 0.954, "CB": 0.954,
     "CC": 0.954, "CD": 0.954, "CE": 0.954, "CF": 0.954, "CG": 1.048,
     "CH": 1.048, "CI": 1.16,  "CJ": 1.048, "CK": 1.16,  "CL": 1.16,
+    "CM": 1.16,  "CN": 1.16,  "CO": 1.16,  "CP": 1.16,
 }
 ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC", "AX", "BC")
 
