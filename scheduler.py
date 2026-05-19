@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from core import build_report
 
@@ -35,6 +36,8 @@ logger = logging.getLogger("sheetsstat.scheduler")
 
 SAMARA_TZ = ZoneInfo("Europe/Samara")
 JOB_ID = "daily_report"
+WATCHER_JOB_ID = "config_watcher"
+WATCHER_INTERVAL_SEC = 10
 
 
 class ReportScheduler:
@@ -49,11 +52,20 @@ class ReportScheduler:
         self._output_dir = output_dir
         self._scheduler = AsyncIOScheduler(timezone=SAMARA_TZ)
         self._last_run: Optional[Dict[str, Any]] = None
+        self._last_schedule_snapshot: Optional[Dict[str, Any]] = None
 
     def start(self) -> None:
         if not self._scheduler.running:
             self._scheduler.start()
         self.reload()
+        self._scheduler.add_job(
+            self._watch_config,
+            trigger=IntervalTrigger(seconds=WATCHER_INTERVAL_SEC),
+            id=WATCHER_JOB_ID,
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
 
     def shutdown(self) -> None:
         if self._scheduler.running:
@@ -69,6 +81,7 @@ class ReportScheduler:
             return
 
         sched_cfg = (config or {}).get("schedule") or {}
+        self._last_schedule_snapshot = dict(sched_cfg)
         enabled = bool(sched_cfg.get("enabled"))
         time_str = (sched_cfg.get("time") or "").strip()
         sub1 = (sched_cfg.get("sub1") or "kub").strip()
@@ -120,6 +133,21 @@ class ReportScheduler:
     def _remove_job(self) -> None:
         if self._scheduler.get_job(JOB_ID):
             self._scheduler.remove_job(JOB_ID)
+
+    def _watch_config(self) -> None:
+        try:
+            config = self._config_loader()
+        except Exception as e:
+            logger.warning("scheduler.watcher: не смог прочитать конфиг: %s", e)
+            return
+        sched_cfg = (config or {}).get("schedule") or {}
+        if sched_cfg == self._last_schedule_snapshot:
+            return
+        logger.info(
+            "scheduler: обнаружено изменение schedule (%s -> %s), перерегистрирую job",
+            self._last_schedule_snapshot, sched_cfg,
+        )
+        self.reload()
 
     async def _run_job(self, sub1: str, manual: bool = False) -> Dict[str, Any]:
         target_day = _yesterday_samara()
