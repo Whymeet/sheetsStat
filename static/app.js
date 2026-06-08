@@ -349,13 +349,12 @@ function renderConfig(cfg) {
 
   document.getElementById("ec-login").value = cfg.eightconnect?.login ?? "";
   document.getElementById("ec-password").value = cfg.eightconnect?.password ?? "";
-  const categoryIds = Array.isArray(cfg.eightconnect?.category_ids) && cfg.eightconnect.category_ids.length
-    ? cfg.eightconnect.category_ids
-    : [149, 395, 620, 624];
+  // Показываем сохранённое значение как есть: пустой список → пустое поле
+  // (подсказка с примером остаётся в placeholder). Иначе пустой scheme_ids
+  // рисовался дефолтами и мог случайно записаться обратно при сохранении.
+  const categoryIds = Array.isArray(cfg.eightconnect?.category_ids) ? cfg.eightconnect.category_ids : [];
   document.getElementById("ec-category-ids").value = categoryIds.join(", ");
-  const schemeIds = Array.isArray(cfg.eightconnect?.scheme_ids) && cfg.eightconnect.scheme_ids.length
-    ? cfg.eightconnect.scheme_ids
-    : [1006, 2260, 2805, 2809, 612];
+  const schemeIds = Array.isArray(cfg.eightconnect?.scheme_ids) ? cfg.eightconnect.scheme_ids : [];
   document.getElementById("ec-scheme-ids").value = schemeIds.join(", ");
 
   document.getElementById("gs-spreadsheet-id").value = cfg.google_sheets?.spreadsheet_id ?? "";

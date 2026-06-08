@@ -335,8 +335,12 @@ def collect_eightconnect(config: Dict[str, Any], day: date) -> Dict[str, Any]:
     ec_cfg = config.get("eightconnect") or {}
     login = (ec_cfg.get("login") or "").strip()
     password = (ec_cfg.get("password") or "").strip()
-    scheme_ids = ec_cfg.get("scheme_ids") or [1006, 2260, 2805, 2809, 612]
-    category_ids = ec_cfg.get("category_ids") or []
+    # Пустой список scheme_ids = «не фильтровать по схемам» (только категории).
+    # Раньше здесь стоял `or [1006,...]`: пустой [] (ложный в Python) молча
+    # подменялся дефолтными схемами, из-за чего профили с category-only фильтром
+    # фильтровались по чужим схемам и давали 0.
+    scheme_ids = list(ec_cfg.get("scheme_ids") or [])
+    category_ids = list(ec_cfg.get("category_ids") or [])
 
     if not login or not password:
         return {
