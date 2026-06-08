@@ -28,11 +28,17 @@ header {
   border-bottom: 1px solid var(--border);
   padding: 12px 24px;
   display: flex;
-  align-items: center;
-  gap: 24px;
+  flex-direction: column;
+  gap: 10px;
   position: sticky;
   top: 0;
   z-index: 10;
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  gap: 24px;
 }
 
 header h1 {
@@ -46,6 +52,46 @@ nav {
   display: flex;
   gap: 4px;
 }
+
+.profile-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.profile-btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s;
+}
+
+.profile-btn:hover { color: var(--text); }
+
+.profile-btn.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.profile-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.profile-actions button {
+  padding: 5px 10px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.profile-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .tab-btn {
   background: transparent;

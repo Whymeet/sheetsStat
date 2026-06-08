@@ -1,14 +1,136 @@
 // ------ Tabs ------
+function activateTab(name) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  document.getElementById(`tab-${name}`).classList.add("active");
+  if (name === "settings") loadConfig();
+  if (name === "history") loadHistory();
+}
+
 document.querySelectorAll(".tab-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-    btn.classList.add("active");
-    document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
-    if (btn.dataset.tab === "settings") loadConfig();
-    if (btn.dataset.tab === "history") loadHistory();
-  });
+  btn.addEventListener("click", () => activateTab(btn.dataset.tab));
 });
+
+// ------ Profiles ------
+let _activeProfileId = null;
+let _profilesState = [];   // [{id, name, sub1, is_active}]
+
+function activeProfile() {
+  return _profilesState.find(p => p.id === _activeProfileId) || null;
+}
+
+async function loadProfiles() {
+  try {
+    const r = await fetch("/api/profiles");
+    const data = await r.json();
+    _profilesState = data.profiles || [];
+    _activeProfileId = data.active_id || (_profilesState[0] && _profilesState[0].id) || null;
+  } catch {
+    _profilesState = [];
+    _activeProfileId = null;
+  }
+  renderProfileBar();
+  prefillReportSub1();
+}
+
+function renderProfileBar() {
+  const bar = document.getElementById("profile-bar");
+  bar.innerHTML = "";
+  _profilesState.forEach(p => {
+    const btn = document.createElement("button");
+    btn.className = "profile-btn" + (p.id === _activeProfileId ? " active" : "");
+    btn.textContent = p.name;
+    btn.title = `sub1=${p.sub1}`;
+    btn.addEventListener("click", () => activateProfile(p.id));
+    bar.appendChild(btn);
+  });
+
+  const actions = document.createElement("span");
+  actions.className = "profile-actions";
+  const last = _profilesState.length <= 1;
+  actions.innerHTML = `
+    <button class="secondary" id="profile-add" title="Создать профиль">＋</button>
+    <button class="secondary" id="profile-copy" title="Копировать активный профиль">⧉</button>
+    <button class="secondary" id="profile-rename" title="Переименовать активный">✎</button>
+    <button class="danger" id="profile-delete" title="Удалить активный"${last ? " disabled" : ""}>🗑</button>`;
+  bar.appendChild(actions);
+
+  document.getElementById("profile-add").addEventListener("click", () => createProfile(false));
+  document.getElementById("profile-copy").addEventListener("click", () => createProfile(true));
+  document.getElementById("profile-rename").addEventListener("click", renameActiveProfile);
+  document.getElementById("profile-delete").addEventListener("click", deleteActiveProfile);
+}
+
+function prefillReportSub1() {
+  const p = activeProfile();
+  const el = document.getElementById("report-sub1");
+  if (p && el) el.value = p.sub1 || "kub";
+}
+
+async function activateProfile(id) {
+  if (id === _activeProfileId) return;
+  try {
+    await fetch(`/api/profiles/${encodeURIComponent(id)}/activate`, { method: "POST" });
+  } catch {}
+  _activeProfileId = id;
+  renderProfileBar();
+  prefillReportSub1();
+  if (document.getElementById("tab-settings").classList.contains("active")) loadConfig();
+}
+
+async function createProfile(copy) {
+  const p = activeProfile();
+  const def = copy ? `${p ? p.name : "Профиль"} (копия)` : "Новый профиль";
+  const name = prompt(copy ? "Имя нового профиля (копия активного):" : "Имя нового профиля:", def);
+  if (!name || !name.trim()) return;
+  const body = { name: name.trim() };
+  if (copy && _activeProfileId) body.copy_from = _activeProfileId;
+  try {
+    const r = await fetch("/api/profiles", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "Ошибка");
+    await loadProfiles();   // бэкенд уже сделал новый профиль активным
+    activateTab("settings");
+  } catch (e) {
+    alert("❌ " + e.message);
+  }
+}
+
+async function renameActiveProfile() {
+  const p = activeProfile();
+  if (!p) return;
+  const name = prompt("Новое имя профиля:", p.name);
+  if (!name || !name.trim()) return;
+  try {
+    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    if (!r.ok) { const d = await r.json(); throw new Error(d.detail || "Ошибка"); }
+    await loadProfiles();
+    if (document.getElementById("tab-settings").classList.contains("active")) loadConfig();
+  } catch (e) {
+    alert("❌ " + e.message);
+  }
+}
+
+async function deleteActiveProfile() {
+  if (_profilesState.length <= 1) return;
+  const p = activeProfile();
+  if (!confirm(`Удалить профиль «${p ? p.name : _activeProfileId}»? Это необратимо.`)) return;
+  try {
+    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}`, { method: "DELETE" });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "Ошибка");
+    await loadProfiles();
+    if (document.getElementById("tab-settings").classList.contains("active")) loadConfig();
+  } catch (e) {
+    alert("❌ " + e.message);
+  }
+}
 
 // ------ Report ------
 const today = new Date().toISOString().slice(0, 10);
@@ -21,6 +143,12 @@ document.getElementById("report-form").addEventListener("submit", async (ev) => 
   const status = document.getElementById("report-status");
   const result = document.getElementById("report-result");
 
+  if (!_activeProfileId) {
+    status.textContent = "❌ Нет активного профиля. Создай его во вкладке «Настройки».";
+    status.className = "status err";
+    return;
+  }
+
   status.textContent = "Считаю… это может занять 10–30 секунд.";
   status.className = "status";
   result.classList.add("hidden");
@@ -29,7 +157,7 @@ document.getElementById("report-form").addEventListener("submit", async (ev) => 
     const r = await fetch("/api/report", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ date, sub1 }),
+      body: JSON.stringify({ profile_id: _activeProfileId, date, sub1 }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -160,20 +288,33 @@ function escapeHtml(s) {
 let _cfgState = null;
 
 async function loadConfig() {
+  if (!_activeProfileId) await loadProfiles();
+  if (!_activeProfileId) {
+    _cfgState = emptyConfig();
+    renderConfig(_cfgState);
+    loadScheduleSettings();
+    return;
+  }
   try {
-    const r = await fetch("/api/config");
-    if (r.status === 404) { _cfgState = emptyConfig(); }
+    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/config`);
+    if (!r.ok) { _cfgState = emptyConfig(); }
     else { _cfgState = await r.json(); }
   } catch {
     _cfgState = emptyConfig();
   }
   renderConfig(_cfgState);
+  loadScheduleSettings();
+
+  const p = activeProfile();
+  document.getElementById("settings-profile-name").textContent = _cfgState.name || (p && p.name) || "—";
+  document.getElementById("profile-sub1").value = _cfgState.sub1 || (p && p.sub1) || "kub";
 }
 
 const DEFAULT_ADS_MANAGER_BASE_URL = "https://kybyshka-dev.ru";
 
 function emptyConfig() {
   return {
+    name: "", sub1: "kub",
     leadstech: { base_url: "https://api.leads.tech", login: "", password: "", page_size: 500 },
     ads_manager: { base_url: DEFAULT_ADS_MANAGER_BASE_URL, username: "", password: "" },
     yandex: { base_url: "", username: "", password: "" },
@@ -182,7 +323,6 @@ function emptyConfig() {
                     category_ids: [149, 395, 620, 624],
                     scheme_ids: [1006, 2260, 2805, 2809, 612] },
     google_sheets: { enabled: false, spreadsheet_id: "", service_account_json_path: "cfg/service_account.json" },
-    schedule: { enabled: false, time: "09:00", sub1: "kub" },
   };
 }
 
@@ -221,12 +361,46 @@ function renderConfig(cfg) {
   document.getElementById("gs-spreadsheet-id").value = cfg.google_sheets?.spreadsheet_id ?? "";
   document.getElementById("gs-enabled").checked = !!cfg.google_sheets?.enabled;
   renderSheetLink();
+}
 
-  document.getElementById("sched-enabled").checked = !!cfg.schedule?.enabled;
-  document.getElementById("sched-time").value = cfg.schedule?.time || "09:00";
-  document.getElementById("sched-sub1").value = cfg.schedule?.sub1 || "kub";
+// Общее расписание (не зависит от профиля) — из манифеста.
+async function loadScheduleSettings() {
+  try {
+    const r = await fetch("/api/schedule-settings");
+    const s = await r.json();
+    document.getElementById("sched-enabled").checked = !!s.enabled;
+    document.getElementById("sched-time").value = s.time || "09:00";
+  } catch {
+    document.getElementById("sched-time").value = "09:00";
+  }
   loadScheduleStatus();
 }
+
+async function saveScheduleSettings() {
+  const status = document.getElementById("sched-save-status");
+  const payload = {
+    enabled: document.getElementById("sched-enabled").checked,
+    time: document.getElementById("sched-time").value.trim() || "09:00",
+  };
+  status.textContent = "Сохраняю…";
+  status.className = "status";
+  try {
+    const r = await fetch("/api/schedule-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+    status.textContent = "✅ Сохранено";
+    status.className = "status ok";
+    loadScheduleStatus();
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+}
+
+document.getElementById("sched-save").addEventListener("click", saveScheduleSettings);
 
 async function loadScheduleStatus() {
   const el = document.getElementById("sched-status");
@@ -242,7 +416,10 @@ async function loadScheduleStatus() {
       if (s.last_run) {
         const lr = s.last_run;
         const when = (lr.finished_at || lr.started_at || "").replace("T", " ");
-        if (lr.ok) {
+        if (Array.isArray(lr.results)) {
+          const okN = lr.results.filter(x => x.ok).length;
+          txt += ` · последний: ${when} → ${okN}/${lr.results.length} профилей ок`;
+        } else if (lr.ok) {
           txt += ` · последний: ${when} → ${lr.saved_to || "ok"}`;
         } else {
           txt += ` · последний упал: ${when} (${lr.error || "см. логи"})`;
@@ -259,24 +436,17 @@ async function loadScheduleStatus() {
 
 document.getElementById("sched-run-now").addEventListener("click", async () => {
   const status = document.getElementById("sched-run-status");
-  const sub1 = document.getElementById("sched-sub1").value.trim() || "kub";
-  status.textContent = "Запускаю…";
+  status.textContent = "Прогоняю все профили…";
   status.className = "status";
   try {
-    const r = await fetch("/api/schedule/run-now", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sub1 }),
-    });
+    const r = await fetch("/api/schedule/run-now", { method: "POST" });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
-    if (data.ok) {
-      status.textContent = `✅ Готово: ${data.date}_${data.sub1}.json`;
-      status.className = "status ok";
-    } else {
-      status.textContent = "❌ " + (data.error || "ошибка");
-      status.className = "status err";
-    }
+    const results = data.results || [];
+    const okN = results.filter(x => x.ok).length;
+    const failN = results.length - okN;
+    status.textContent = `✅ Готово (${data.date}): ${okN} ок${failN ? `, ${failN} с ошибкой` : ""}`;
+    status.className = failN ? "status err" : "status ok";
     loadScheduleStatus();
   } catch (e) {
     status.textContent = "❌ " + e.message;
@@ -305,7 +475,15 @@ document.addEventListener("input", (e) => {
 document.getElementById("save-config").addEventListener("click", async () => {
   const status = document.getElementById("save-status");
 
+  if (!_activeProfileId) {
+    status.textContent = "❌ Нет активного профиля.";
+    status.className = "status err";
+    return;
+  }
+
   const payload = {
+    name: (activeProfile()?.name) || _cfgState?.name || "",
+    sub1: document.getElementById("profile-sub1").value.trim() || "kub",
     leadstech: {
       base_url: document.getElementById("lt-base-url").value.trim(),
       login: document.getElementById("lt-login").value.trim(),
@@ -345,11 +523,6 @@ document.getElementById("save-config").addEventListener("click", async () => {
       spreadsheet_id: extractSpreadsheetId(document.getElementById("gs-spreadsheet-id").value),
       service_account_json_path: _cfgState?.google_sheets?.service_account_json_path || "cfg/service_account.json",
     },
-    schedule: {
-      enabled: document.getElementById("sched-enabled").checked,
-      time: document.getElementById("sched-time").value.trim() || "09:00",
-      sub1: document.getElementById("sched-sub1").value.trim() || "kub",
-    },
     analysis: _cfgState?.analysis || { lookback_days: 7 },
   };
 
@@ -357,7 +530,7 @@ document.getElementById("save-config").addEventListener("click", async () => {
   status.className = "status";
 
   try {
-    const r = await fetch("/api/config", {
+    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/config`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -367,7 +540,7 @@ document.getElementById("save-config").addEventListener("click", async () => {
     status.textContent = "✅ Сохранено";
     status.className = "status ok";
     _cfgState = payload;
-    loadScheduleStatus();
+    await loadProfiles();   // name/sub1 в полосе могли измениться
   } catch (e) {
     status.textContent = "❌ " + e.message;
     status.className = "status err";
@@ -410,3 +583,6 @@ async function loadHistory() {
 }
 
 document.getElementById("history-reload").addEventListener("click", loadHistory);
+
+// ------ Bootstrap ------
+loadProfiles();

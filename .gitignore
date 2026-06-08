@@ -40,6 +40,7 @@ leads_stat*.json
 cfg/*.json
 cfg/*.yaml
 cfg/*.yml
+cfg/profiles/
 lt_vk_config.json
 service_account*.json
 *.key

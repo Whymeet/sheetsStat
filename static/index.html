@@ -8,12 +8,15 @@
 </head>
 <body>
 <header>
-  <h1>sheetsStat</h1>
-  <nav>
-    <button class="tab-btn active" data-tab="report">Отчёт</button>
-    <button class="tab-btn" data-tab="settings">Настройки</button>
-    <button class="tab-btn" data-tab="history">История</button>
-  </nav>
+  <div class="header-top">
+    <h1>sheetsStat</h1>
+    <nav>
+      <button class="tab-btn active" data-tab="report">Отчёт</button>
+      <button class="tab-btn" data-tab="settings">Настройки</button>
+      <button class="tab-btn" data-tab="history">История</button>
+    </nav>
+  </div>
+  <div id="profile-bar" class="profile-bar"></div>
 </header>
 
 <main>
@@ -96,6 +99,19 @@
 
   <!-- TAB: SETTINGS -->
   <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>Профиль: <span id="settings-profile-name">—</span></h2>
+      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+        Все настройки ниже относятся к активному профилю (выбран во вкладках вверху).
+        Создать/копировать/переименовать/удалить профиль — кнопки на полосе профилей.
+      </p>
+      <div class="grid two">
+        <label>sub1 / LeadsTech label профиля
+          <input type="text" id="profile-sub1" value="kub" placeholder="kub">
+        </label>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Ads Manager</h2>
       <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
@@ -205,11 +221,11 @@
     </div>
 
     <div class="card">
-      <h2>Планировщик</h2>
+      <h2>Расписание (общее для всех профилей)</h2>
       <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        Автоматически собирать отчёт за предыдущий день в указанное время по Самаре
-        (UTC+4) и писать в <code>output/</code> + Google Sheets. Повторный запуск в ту же
-        дату перезаписывает данные.
+        Одно общее время. В этот момент по очереди собираются отчёты за предыдущий день
+        по <b>всем</b> профилям (каждый в свою таблицу со своим sub1) и пишутся в
+        <code>output/</code> + Google Sheets. Повторный запуск в ту же дату перезаписывает данные.
       </p>
       <div class="grid two">
         <label style="display:flex; align-items:center; gap:8px;">
@@ -218,12 +234,13 @@
         <label>Время (HH:MM, Samara)
           <input type="text" id="sched-time" value="09:00" placeholder="09:00">
         </label>
-        <label>sub1
-          <input type="text" id="sched-sub1" value="kub" placeholder="kub">
-        </label>
+      </div>
+      <div style="margin-top:10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <button id="sched-save" class="primary" type="button">Сохранить расписание</button>
+        <span id="sched-save-status" class="status"></span>
       </div>
       <p id="sched-status" class="status" style="margin-top:10px;"></p>
-      <button id="sched-run-now" class="secondary" type="button">Запустить за вчера сейчас</button>
+      <button id="sched-run-now" class="secondary" type="button">Прогнать все профили за вчера</button>
       <span id="sched-run-status" class="status"></span>
     </div>
 

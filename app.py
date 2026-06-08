@@ -1,17 +1,25 @@
 """Мини-веб-морда для sheetsStat.
 
-Два экрана: «Отчёт» (выбор даты + sub1 → VK spent + LT aggregate) и
-«Настройки» (редактировать cfg/lt_vk_config.json — LeadsTech логин/пароль,
-список кабинетов).
+Профили: несколько независимых наборов настроек (под разные Google-таблицы),
+переключаемых глобальными вкладками. Каждый профиль — отдельный файл
+cfg/profiles/<id>.json (все источники + name + sub1). Глобальный манифест
+cfg/profiles.json хранит порядок, активный профиль и общее расписание.
 
 API:
-    GET  /api/config            — отдать текущий конфиг (пароли/токены маскируются)
-    POST /api/config            — сохранить конфиг (пустой пароль = оставить старый)
-    POST /api/report            — сгенерировать отчёт {date, sub1}
-    GET  /api/reports           — список сохранённых отчётов
-    GET  /api/reports/{name}    — содержимое конкретного отчёта
-    GET  /api/schedule          — статус планировщика (next_run, last_run)
-    POST /api/schedule/run-now  — ручной запуск автопостроения за вчера
+    GET    /api/profiles               — список профилей + активный + расписание
+    POST   /api/profiles               — создать профиль (пустой или копией)
+    PUT    /api/profiles/{id}           — переименовать
+    DELETE /api/profiles/{id}           — удалить (нельзя последний)
+    POST   /api/profiles/{id}/activate  — сделать активным
+    GET    /api/profiles/{id}/config    — конфиг профиля (секреты маскируются)
+    POST   /api/profiles/{id}/config    — сохранить конфиг профиля
+    GET    /api/schedule-settings       — общее расписание {enabled, time}
+    POST   /api/schedule-settings       — сохранить общее расписание
+    POST   /api/report                  — отчёт {profile_id, date, sub1?}
+    GET    /api/reports                 — список сохранённых отчётов
+    GET    /api/reports/{name}          — содержимое конкретного отчёта
+    GET    /api/schedule                — статус планировщика (next_run, last_run)
+    POST   /api/schedule/run-now        — ручной прогон всех профилей за вчера
 
 Статика отдаётся из папки static/.
 """
@@ -31,7 +39,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from config_loader import load_lt_vk_config
 from core import build_report
 from scheduler import ReportScheduler
 
@@ -55,15 +62,28 @@ logger = logging.getLogger("sheetsstat.web")
 
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "cfg" / "lt_vk_config.json"
+CONFIG_PATH = BASE_DIR / "cfg" / "lt_vk_config.json"  # legacy: источник миграции + CLI
+PROFILES_DIR = BASE_DIR / "cfg" / "profiles"
+MANIFEST_PATH = BASE_DIR / "cfg" / "profiles.json"
 OUTPUT_DIR = BASE_DIR / "output"
 STATIC_DIR = BASE_DIR / "static"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
-# Чувствительные поля в конфиге: маскируются в GET /api/config и при
-# POST /api/config c пустой строкой заменяются значениями с диска, чтобы
+# Транслитерация кириллицы для генерации id профиля из его имени.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+# Чувствительные поля в конфиге: маскируются в GET .../config и при
+# POST .../config c пустой строкой заменяются значениями с диска, чтобы
 # фронт не затирал креды при редактировании не-секретных полей.
 SECRET_FIELDS: List[tuple] = [
     ("leadstech", "password"),
@@ -74,13 +94,157 @@ SECRET_FIELDS: List[tuple] = [
 ]
 
 
-def _read_config_on_disk() -> Dict[str, Any]:
-    if not CONFIG_PATH.exists():
-        return {}
+# ---------- Profiles storage ----------
+
+def _slugify(name: str) -> str:
+    s = (name or "").strip().lower()
+    s = "".join(_TRANSLIT.get(ch, ch) for ch in s)
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s
+
+
+def _gen_id(name: str, existing: set) -> str:
+    base = _slugify(name) or "profile"
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}-{i}" in existing:
+        i += 1
+    return f"{base}-{i}"
+
+
+def _validate_pid(pid: str) -> str:
+    if not pid or not _PROFILE_ID_RE.match(pid):
+        raise HTTPException(status_code=400, detail="bad profile id")
+    return pid
+
+
+def _profile_file(pid: str) -> Path:
+    return PROFILES_DIR / f"{pid}.json"
+
+
+def _default_manifest() -> Dict[str, Any]:
+    return {"version": 1, "active_id": None, "order": [],
+            "schedule": {"enabled": False, "time": "09:00"}}
+
+
+def read_manifest() -> Dict[str, Any]:
+    if not MANIFEST_PATH.exists():
+        return _default_manifest()
     try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        m = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
+        return _default_manifest()
+    m.setdefault("version", 1)
+    m.setdefault("order", [])
+    m.setdefault("schedule", {"enabled": False, "time": "09:00"})
+    if "active_id" not in m:
+        m["active_id"] = m["order"][0] if m["order"] else None
+    return m
+
+
+def write_manifest(m: Dict[str, Any]) -> None:
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if MANIFEST_PATH.exists():
+        shutil.copy2(MANIFEST_PATH, MANIFEST_PATH.with_suffix(".json.bak"))
+    MANIFEST_PATH.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_profile_safe(pid: str) -> Optional[Dict[str, Any]]:
+    path = _profile_file(pid)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def read_profile(pid: str) -> Dict[str, Any]:
+    _validate_pid(pid)
+    data = _read_profile_safe(pid)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"profile not found: {pid}")
+    return data
+
+
+def write_profile(pid: str, data: Dict[str, Any]) -> None:
+    _validate_pid(pid)
+    path = _profile_file(pid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(".json.bak"))
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def list_profile_ids() -> List[str]:
+    """Порядок из манифеста; самовосстановление по содержимому каталога."""
+    m = read_manifest()
+    order = [pid for pid in m.get("order", []) if _profile_file(pid).exists()]
+    if PROFILES_DIR.exists():
+        for p in sorted(PROFILES_DIR.glob("*.json")):
+            pid = p.stem
+            if _PROFILE_ID_RE.match(pid) and pid not in order:
+                order.append(pid)
+    return order
+
+
+def _empty_profile_body(name: str, sub1: str = "kub") -> Dict[str, Any]:
+    return {
+        "name": name,
+        "sub1": sub1,
+        "leadstech": {"base_url": "https://api.leads.tech", "login": "", "password": "",
+                      "page_size": 500, "strictSubs": 0, "untilCurrentTime": 0,
+                      "limitLowerDay": 0, "limitUpperDay": 0,
+                      "banner_sub_fields": ["sub4", "sub5"]},
+        "ads_manager": {"base_url": "https://kybyshka-dev.ru", "username": "", "password": ""},
+        "yandex": {"base_url": "", "username": "", "password": ""},
+        "yandex_metrika": {"oauth_token": "", "counter_id": 0,
+                           "goals": ["Zayvka"], "attribution": "LASTSIGN"},
+        "eightconnect": {"base_url": "https://8connect.ru", "login": "", "password": "",
+                         "category_ids": [], "scheme_ids": [1006, 2260, 2805, 2809, 612]},
+        "google_sheets": {"enabled": False, "spreadsheet_id": "",
+                          "service_account_json_path": "cfg/service_account.json"},
+        "analysis": {"lookback_days": 7},
+    }
+
+
+def ensure_profiles_migrated() -> None:
+    """Идемпотентно: при первом старте создаёт профили из legacy-конфига."""
+    if MANIFEST_PATH.exists():
+        return
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+    old = None
+    if CONFIG_PATH.exists():
+        try:
+            old = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            old = None
+
+    if old:
+        sched = old.get("schedule") or {}
+        sub1 = (sched.get("sub1") or "kub").strip() or "kub"
+        name = "Основной"
+        pid = _gen_id(name, set())
+        body = {k: v for k, v in old.items() if k != "schedule"}
+        body["name"] = name
+        body["sub1"] = sub1
+        write_profile(pid, body)
+        write_manifest({
+            "version": 1, "active_id": pid, "order": [pid],
+            "schedule": {"enabled": bool(sched.get("enabled", False)),
+                         "time": (sched.get("time") or "09:00")},
+        })
+        logger.info("Профили: мигрировал lt_vk_config.json → профиль %r", pid)
+    else:
+        pid = _gen_id("Основной", set())
+        write_profile(pid, _empty_profile_body("Основной", "kub"))
+        write_manifest({
+            "version": 1, "active_id": pid, "order": [pid],
+            "schedule": {"enabled": False, "time": "09:00"},
+        })
+        logger.info("Профили: создан дефолтный профиль %r", pid)
 
 
 def _mask_secrets(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -158,12 +322,11 @@ class GoogleSheetsSettings(BaseModel):
         return _extract_spreadsheet_id(v or "")
 
 
-class ScheduleSettings(BaseModel):
-    """Автозапуск `build_report` раз в сутки по Samara-time за прошлый день."""
+class ScheduleGlobal(BaseModel):
+    """Общее расписание для всех профилей (Samara-time, за прошлый день)."""
 
     enabled: bool = False
     time: str = "09:00"  # HH:MM, Europe/Samara
-    sub1: str = "kub"
 
     @field_validator("time")
     @classmethod
@@ -175,36 +338,63 @@ class ScheduleSettings(BaseModel):
 
 
 class ConfigPayload(BaseModel):
+    """Конфиг одного профиля. Расписание — общее, живёт в манифесте."""
+
+    name: Optional[str] = None
+    sub1: str = "kub"
     leadstech: LeadsTechSettings
     ads_manager: AdsManagerSettings = Field(default_factory=AdsManagerSettings)
     yandex: YandexSettings = Field(default_factory=YandexSettings)
     yandex_metrika: YandexMetrikaSettings = Field(default_factory=YandexMetrikaSettings)
     eightconnect: EightConnectSettings = Field(default_factory=EightConnectSettings)
     google_sheets: GoogleSheetsSettings = Field(default_factory=GoogleSheetsSettings)
-    schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
     analysis: Dict[str, Any] = Field(default_factory=lambda: {"lookback_days": 7})
 
 
+class ProfileCreate(BaseModel):
+    name: str
+    copy_from: Optional[str] = None
+
+
+class ProfileRename(BaseModel):
+    name: str
+
+
 class ReportRequest(BaseModel):
+    profile_id: str
     date: str  # YYYY-MM-DD
-    sub1: str = "kub"
-
-
-class ScheduleRunNowRequest(BaseModel):
-    sub1: Optional[str] = None
+    sub1: Optional[str] = None  # None → берём sub1 профиля
 
 
 # ---------- App ----------
 
 
+def _schedule_provider() -> Dict[str, Any]:
+    return read_manifest().get("schedule") or {}
+
+
+def _profiles_provider() -> List[tuple]:
+    """[(profile_id, config, sub1), ...] для планировщика."""
+    out: List[tuple] = []
+    for pid in list_profile_ids():
+        cfg = _read_profile_safe(pid)
+        if cfg is None:
+            continue
+        sub1 = (cfg.get("sub1") or "kub").strip() or "kub"
+        out.append((pid, cfg, sub1))
+    return out
+
+
 scheduler: ReportScheduler = ReportScheduler(
-    config_loader=lambda: _read_config_on_disk(),
+    schedule_provider=_schedule_provider,
+    profiles_provider=_profiles_provider,
     output_dir=OUTPUT_DIR,
 )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    ensure_profiles_migrated()
     scheduler.start()
     try:
         yield
@@ -220,44 +410,148 @@ def health():
     return {"ok": True}
 
 
-@app.get("/api/config")
-def get_config():
-    if not CONFIG_PATH.exists():
-        raise HTTPException(status_code=404, detail=f"Config not found: {CONFIG_PATH}")
-    return _mask_secrets(_read_config_on_disk())
+# ---------- Profiles ----------
+
+@app.get("/api/profiles")
+def list_profiles():
+    m = read_manifest()
+    ids = list_profile_ids()
+    active = m.get("active_id")
+    if active not in ids:
+        active = ids[0] if ids else None
+    profiles = []
+    for pid in ids:
+        cfg = _read_profile_safe(pid) or {}
+        profiles.append({
+            "id": pid,
+            "name": cfg.get("name") or pid,
+            "sub1": cfg.get("sub1") or "kub",
+            "is_active": pid == active,
+        })
+    return {
+        "active_id": active,
+        "schedule": m.get("schedule") or {"enabled": False, "time": "09:00"},
+        "profiles": profiles,
+    }
 
 
-@app.post("/api/config")
-def save_config(payload: ConfigPayload):
-    # Бэкап до записи
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if CONFIG_PATH.exists():
-        backup = CONFIG_PATH.with_suffix(".json.bak")
-        shutil.copy2(CONFIG_PATH, backup)
+@app.post("/api/profiles")
+def create_profile(body: ProfileCreate):
+    name = (body.name or "").strip() or "Новый профиль"
+    m = read_manifest()
+    existing = set(list_profile_ids())
+    pid = _gen_id(name, existing)
 
-    data = _merge_preserved_secrets(payload.model_dump(), _read_config_on_disk())
-    CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if body.copy_from:
+        src = read_profile(body.copy_from)  # 404 если нет
+        data = json.loads(json.dumps(src))  # глубокая копия (с реальными секретами)
+        data["name"] = name
+        data.setdefault("sub1", "kub")
+    else:
+        data = _empty_profile_body(name, "kub")
+
+    write_profile(pid, data)
+    order = [x for x in m.get("order", []) if x != pid]
+    order.append(pid)
+    m["order"] = order
+    m["active_id"] = pid  # новый профиль сразу активен
+    write_manifest(m)
+    logger.info("Профиль создан: %r (copy_from=%r)", pid, body.copy_from)
+    return {"id": pid, "name": name, "active_id": pid}
+
+
+@app.put("/api/profiles/{pid}")
+def rename_profile(pid: str, body: ProfileRename):
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="имя не может быть пустым")
+    data = read_profile(pid)
+    data["name"] = name
+    write_profile(pid, data)
+    return {"id": pid, "name": name}
+
+
+@app.delete("/api/profiles/{pid}")
+def delete_profile(pid: str):
+    _validate_pid(pid)
+    m = read_manifest()
+    ids = list_profile_ids()
+    if pid not in ids:
+        raise HTTPException(status_code=404, detail="profile not found")
+    if len(ids) <= 1:
+        raise HTTPException(status_code=400, detail="нельзя удалить последний профиль")
+
+    path = _profile_file(pid)
+    bak = path.with_suffix(".json.bak")
+    if path.exists():
+        path.unlink()
+    if bak.exists():
+        bak.unlink()
+
+    order = [x for x in m.get("order", []) if x != pid]
+    m["order"] = order
+    if m.get("active_id") == pid:
+        m["active_id"] = order[0] if order else None
+    write_manifest(m)
+    scheduler.reload()
+    logger.info("Профиль удалён: %r, активный → %r", pid, m["active_id"])
+    return {"ok": True, "active_id": m["active_id"]}
+
+
+@app.post("/api/profiles/{pid}/activate")
+def activate_profile(pid: str):
+    _validate_pid(pid)
+    if pid not in list_profile_ids():
+        raise HTTPException(status_code=404, detail="profile not found")
+    m = read_manifest()
+    m["active_id"] = pid
+    write_manifest(m)
+    return {"active_id": pid}
+
+
+@app.get("/api/profiles/{pid}/config")
+def get_profile_config(pid: str):
+    return _mask_secrets(read_profile(pid))
+
+
+@app.post("/api/profiles/{pid}/config")
+def save_profile_config(pid: str, payload: ConfigPayload):
+    on_disk = read_profile(pid)  # 404 если профиля нет
+    data = _merge_preserved_secrets(payload.model_dump(), on_disk)
+    if not data.get("name"):
+        data["name"] = on_disk.get("name") or pid
+    write_profile(pid, data)
     ym = data.get("yandex_metrika") or {}
     ec = data.get("eightconnect") or {}
     gs = data.get("google_sheets") or {}
     logger.info(
-        "Config saved: LT login=%s, AdsManager base=%s user=%s, Yandex base=%s user=%s, "
-        "Metrika counter=%s goals=%s token=%s, 8connect login=%s schemes=%s, "
-        "Sheets enabled=%s id=%s",
-        data["leadstech"]["login"],
-        data["ads_manager"]["base_url"],
-        data["ads_manager"]["username"],
-        data.get("yandex", {}).get("base_url", ""),
+        "Profile %r saved: sub1=%s, LT login=%s, AdsManager user=%s, Yandex user=%s, "
+        "Metrika counter=%s token=%s, 8connect login=%s schemes=%s, Sheets enabled=%s id=%s",
+        pid, data.get("sub1"),
+        data["leadstech"]["login"], data["ads_manager"]["username"],
         data.get("yandex", {}).get("username", ""),
-        ym.get("counter_id", 0),
-        ym.get("goals") or [],
-        "set" if ym.get("oauth_token") else "empty",
-        ec.get("login") or "",
-        ec.get("scheme_ids") or [],
-        gs.get("enabled", False),
-        gs.get("spreadsheet_id", ""),
+        ym.get("counter_id", 0), "set" if ym.get("oauth_token") else "empty",
+        ec.get("login") or "", ec.get("scheme_ids") or [],
+        gs.get("enabled", False), gs.get("spreadsheet_id", ""),
     )
     scheduler.reload()
+    return {"ok": True}
+
+
+# ---------- Schedule (общее для всех профилей) ----------
+
+@app.get("/api/schedule-settings")
+def get_schedule_settings():
+    return read_manifest().get("schedule") or {"enabled": False, "time": "09:00"}
+
+
+@app.post("/api/schedule-settings")
+def save_schedule_settings(s: ScheduleGlobal):
+    m = read_manifest()
+    m["schedule"] = {"enabled": s.enabled, "time": s.time}
+    write_manifest(m)
+    scheduler.reload()
+    logger.info("Расписание сохранено: enabled=%s time=%s", s.enabled, s.time)
     return {"ok": True}
 
 
@@ -267,12 +561,8 @@ def get_schedule():
 
 
 @app.post("/api/schedule/run-now")
-async def schedule_run_now(req: ScheduleRunNowRequest):
-    cfg_on_disk = _read_config_on_disk()
-    sub1 = (req.sub1 or "").strip()
-    if not sub1:
-        sub1 = ((cfg_on_disk.get("schedule") or {}).get("sub1") or "kub").strip()
-    return await scheduler.trigger_now(sub1=sub1)
+async def schedule_run_now():
+    return await scheduler.trigger_now()
 
 
 @app.post("/api/report")
@@ -282,13 +572,11 @@ def run_report(req: ReportRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="date должен быть в формате YYYY-MM-DD")
 
-    if not CONFIG_PATH.exists():
-        raise HTTPException(status_code=400, detail="Конфиг не настроен. Зайди во вкладку «Настройки».")
-
-    config = load_lt_vk_config(str(CONFIG_PATH))
+    config = read_profile(req.profile_id)  # 404 если профиля нет
+    sub1 = (req.sub1 or "").strip() or (config.get("sub1") or "kub")
 
     try:
-        report = build_report(config, day, req.sub1)
+        report = build_report(config, day, sub1)
     except Exception as e:
         logger.error("Report error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
@@ -300,10 +588,10 @@ def run_report(req: ReportRequest):
         if errs:
             report["warning"] = f"Ads Manager: {errs[0].get('error')}"
         else:
-            report["warning"] = f"Нет кабинетов с label={req.sub1!r} у пользователя Ads Manager."
+            report["warning"] = f"Нет кабинетов с label={sub1!r} у пользователя Ads Manager."
 
-    # Сохраняем в output/
-    out_file = OUTPUT_DIR / f"{day.isoformat()}_{req.sub1}.json"
+    # Сохраняем в output/ (profile_id в имени — sub1 у профилей может совпадать)
+    out_file = OUTPUT_DIR / f"{day.isoformat()}_{sub1}__{req.profile_id}.json"
     out_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     report["_saved_to"] = out_file.name
 

@@ -1,20 +1,19 @@
-"""Автоматическая генерация дневного отчёта по расписанию.
+"""Автоматическая генерация дневных отчётов по расписанию.
 
-Задача: каждый день в указанное время по Самаре собирать отчёт за
-предыдущий календарный день (Samara-time) и класть его туда же, куда
-пишет ручной `POST /api/report` — в `output/{date}_{sub1}.json` и в
-Google Sheets.
+Задача: каждый день в одно общее время по Самаре собирать отчёты за
+предыдущий календарный день (Samara-time) по ВСЕМ профилям и класть их
+туда же, куда пишет ручной `POST /api/report` — в
+`output/{date}_{sub1}__{profile_id}.json` и в Google Sheets.
 
-Конфигурация живёт в `cfg/lt_vk_config.json` в блоке:
+Общее расписание живёт в манифесте `cfg/profiles.json`:
 
-    "schedule": {
-      "enabled": false,
-      "time": "09:00",      // HH:MM по Europe/Samara (UTC+4)
-      "sub1": "kub"
-    }
+    "schedule": { "enabled": false, "time": "09:00" }   // HH:MM Europe/Samara
+
+В заданное время по очереди прогоняются все профили (каждый со своим
+конфигом/таблицей/sub1). Падение одного профиля не валит остальные.
 
 Используем in-process AsyncIOScheduler: стартует вместе с uvicorn в
-FastAPI lifespan, при сохранении конфига job перестраивается на лету.
+FastAPI lifespan, при изменении расписания job перестраивается на лету.
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -45,10 +44,14 @@ class ReportScheduler:
 
     def __init__(
         self,
-        config_loader: Callable[[], Dict[str, Any]],
+        schedule_provider: Callable[[], Dict[str, Any]],
+        profiles_provider: Callable[[], List[Tuple[str, Dict[str, Any], str]]],
         output_dir: Path,
     ):
-        self._config_loader = config_loader
+        # schedule_provider() -> {"enabled": bool, "time": "HH:MM"}
+        # profiles_provider() -> [(profile_id, config, sub1), ...]
+        self._schedule_provider = schedule_provider
+        self._profiles_provider = profiles_provider
         self._output_dir = output_dir
         self._scheduler = AsyncIOScheduler(timezone=SAMARA_TZ)
         self._last_run: Optional[Dict[str, Any]] = None
@@ -72,19 +75,17 @@ class ReportScheduler:
             self._scheduler.shutdown(wait=False)
 
     def reload(self) -> None:
-        """Перечитывает `schedule` из конфига и (пере)регистрирует job."""
+        """Перечитывает общее расписание и (пере)регистрирует job."""
         try:
-            config = self._config_loader()
+            sched_cfg = self._schedule_provider() or {}
         except Exception as e:
-            logger.warning("scheduler.reload: не смог загрузить конфиг: %s", e)
+            logger.warning("scheduler.reload: не смог прочитать расписание: %s", e)
             self._remove_job()
             return
 
-        sched_cfg = (config or {}).get("schedule") or {}
         self._last_schedule_snapshot = dict(sched_cfg)
         enabled = bool(sched_cfg.get("enabled"))
         time_str = (sched_cfg.get("time") or "").strip()
-        sub1 = (sched_cfg.get("sub1") or "kub").strip()
 
         if not enabled:
             logger.info("scheduler: выключен (schedule.enabled = false)")
@@ -102,14 +103,13 @@ class ReportScheduler:
             self._run_job,
             trigger=trigger,
             id=JOB_ID,
-            kwargs={"sub1": sub1},
             replace_existing=True,
             coalesce=True,
             misfire_grace_time=3600,
         )
         logger.info(
-            "scheduler: job зарегистрирован — %02d:%02d Samara, sub1=%s",
-            hour, minute, sub1,
+            "scheduler: job зарегистрирован — %02d:%02d Samara, все профили",
+            hour, minute,
         )
 
     def status(self) -> Dict[str, Any]:
@@ -124,9 +124,9 @@ class ReportScheduler:
             "last_run": self._last_run,
         }
 
-    async def trigger_now(self, sub1: str) -> Dict[str, Any]:
+    async def trigger_now(self) -> Dict[str, Any]:
         """Ручной триггер для тестирования/фронта. Не возвращает до конца работы."""
-        return await self._run_job(sub1=sub1, manual=True)
+        return await self._run_job(manual=True)
 
     # ------------------------------------------------------------------
 
@@ -136,61 +136,70 @@ class ReportScheduler:
 
     def _watch_config(self) -> None:
         try:
-            config = self._config_loader()
+            sched_cfg = self._schedule_provider() or {}
         except Exception as e:
-            logger.warning("scheduler.watcher: не смог прочитать конфиг: %s", e)
+            logger.warning("scheduler.watcher: не смог прочитать расписание: %s", e)
             return
-        sched_cfg = (config or {}).get("schedule") or {}
         if sched_cfg == self._last_schedule_snapshot:
             return
         logger.info(
-            "scheduler: обнаружено изменение schedule (%s -> %s), перерегистрирую job",
+            "scheduler: обнаружено изменение расписания (%s -> %s), перерегистрирую job",
             self._last_schedule_snapshot, sched_cfg,
         )
         self.reload()
 
-    async def _run_job(self, sub1: str, manual: bool = False) -> Dict[str, Any]:
+    async def _run_job(self, manual: bool = False) -> Dict[str, Any]:
         target_day = _yesterday_samara()
         label = "manual" if manual else "cron"
-        logger.info("scheduler[%s]: build_report for %s sub1=%s", label, target_day, sub1)
-
         started_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
+
         try:
-            config = self._config_loader()
-            report = build_report(config, target_day, sub1)
-            out_file = self._output_dir / f"{target_day.isoformat()}_{sub1}.json"
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-            out_file.write_text(
-                json.dumps(report, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            finished_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
-            self._last_run = {
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "date": target_day.isoformat(),
-                "sub1": sub1,
-                "trigger": label,
-                "ok": True,
-                "saved_to": out_file.name,
-                "cabinet_count": report.get("cabinet_count"),
-                "google_sheets_error": (report.get("google_sheets") or {}).get("error"),
-            }
-            logger.info("scheduler[%s]: ok, saved %s", label, out_file.name)
-            return self._last_run
+            profiles = self._profiles_provider()
         except Exception as e:
-            finished_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
-            self._last_run = {
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "date": target_day.isoformat(),
-                "sub1": sub1,
-                "trigger": label,
-                "ok": False,
-                "error": f"{type(e).__name__}: {e}",
-            }
-            logger.error("scheduler[%s]: build_report failed: %s", label, e, exc_info=True)
-            return self._last_run
+            logger.error("scheduler[%s]: не смог получить профили: %s", label, e, exc_info=True)
+            profiles = []
+
+        logger.info("scheduler[%s]: прогон %d профилей за %s", label, len(profiles), target_day)
+
+        results: List[Dict[str, Any]] = []
+        for pid, config, sub1 in profiles:
+            try:
+                report = build_report(config, target_day, sub1)
+                out_file = self._output_dir / f"{target_day.isoformat()}_{sub1}__{pid}.json"
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                out_file.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                results.append({
+                    "profile_id": pid,
+                    "sub1": sub1,
+                    "ok": True,
+                    "saved_to": out_file.name,
+                    "cabinet_count": report.get("cabinet_count"),
+                    "google_sheets_error": (report.get("google_sheets") or {}).get("error"),
+                })
+                logger.info("scheduler[%s]: профиль %r ok, saved %s", label, pid, out_file.name)
+            except Exception as e:
+                results.append({
+                    "profile_id": pid,
+                    "sub1": sub1,
+                    "ok": False,
+                    "error": f"{type(e).__name__}: {e}",
+                })
+                logger.error("scheduler[%s]: профиль %r упал: %s", label, pid, e, exc_info=True)
+
+        finished_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
+        self._last_run = {
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "date": target_day.isoformat(),
+            "trigger": label,
+            "ok": bool(results) and all(r["ok"] for r in results),
+            "count": len(results),
+            "results": results,
+        }
+        return self._last_run
 
 
 def _yesterday_samara() -> date:
