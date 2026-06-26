@@ -1,19 +1,20 @@
 """Автоматическая генерация дневных отчётов по расписанию.
 
-Задача: каждый день в одно общее время по Самаре собирать отчёты за
-предыдущий календарный день (Samara-time) по ВСЕМ профилям и класть их
+Задача: для каждого бренда (профиля) в его собственное время по Самаре
+собирать отчёт за предыдущий календарный день (Samara-time) и класть его
 туда же, куда пишет ручной `POST /api/report` — в
 `output/{date}_{sub1}__{profile_id}.json` и в Google Sheets.
 
-Общее расписание живёт в манифесте `cfg/profiles.json`:
+Расписание у каждого бренда своё и живёт прямо в файле профиля
+`cfg/profiles/<id>.json`:
 
     "schedule": { "enabled": false, "time": "09:00" }   // HH:MM Europe/Samara
 
-В заданное время по очереди прогоняются все профили (каждый со своим
-конфигом/таблицей/sub1). Падение одного профиля не валит остальные.
+На каждый бренд с `schedule.enabled=true` регистрируется отдельный cron-job
+`report__<pid>`. Падение одного бренда не влияет на остальные.
 
 Используем in-process AsyncIOScheduler: стартует вместе с uvicorn в
-FastAPI lifespan, при изменении расписания job перестраивается на лету.
+FastAPI lifespan, при изменении любого расписания job'ы перестраиваются на лету.
 """
 from __future__ import annotations
 
@@ -34,28 +35,29 @@ from core import build_report
 logger = logging.getLogger("sheetsstat.scheduler")
 
 SAMARA_TZ = ZoneInfo("Europe/Samara")
-JOB_ID = "daily_report"
+JOB_PREFIX = "report__"          # один job на бренд: report__<pid>
 WATCHER_JOB_ID = "config_watcher"
 WATCHER_INTERVAL_SEC = 10
 
+# profiles_provider() -> [(profile_id, config, sub1, schedule), ...]
+ProfileTuple = Tuple[str, Dict[str, Any], str, Dict[str, Any]]
+
 
 class ReportScheduler:
-    """Оборачивает AsyncIOScheduler, хранит статус последнего/следующего запуска."""
+    """Оборачивает AsyncIOScheduler: по одному cron-job на бренд, статусы per-brand."""
 
     def __init__(
         self,
-        schedule_provider: Callable[[], Dict[str, Any]],
-        profiles_provider: Callable[[], List[Tuple[str, Dict[str, Any], str]]],
+        profiles_provider: Callable[[], List[ProfileTuple]],
         output_dir: Path,
     ):
-        # schedule_provider() -> {"enabled": bool, "time": "HH:MM"}
-        # profiles_provider() -> [(profile_id, config, sub1), ...]
-        self._schedule_provider = schedule_provider
         self._profiles_provider = profiles_provider
         self._output_dir = output_dir
         self._scheduler = AsyncIOScheduler(timezone=SAMARA_TZ)
-        self._last_run: Optional[Dict[str, Any]] = None
-        self._last_schedule_snapshot: Optional[Dict[str, Any]] = None
+        # last_run по каждому бренду: {pid: run_info}
+        self._last_runs: Dict[str, Dict[str, Any]] = {}
+        # снапшот расписаний {pid: schedule} для watcher'а
+        self._last_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
 
     def start(self) -> None:
         if not self._scheduler.running:
@@ -75,131 +77,186 @@ class ReportScheduler:
             self._scheduler.shutdown(wait=False)
 
     def reload(self) -> None:
-        """Перечитывает общее расписание и (пере)регистрирует job."""
+        """Перечитывает per-brand расписания и (пере)регистрирует cron-job'ы."""
         try:
-            sched_cfg = self._schedule_provider() or {}
+            profiles = self._profiles_provider() or []
         except Exception as e:
-            logger.warning("scheduler.reload: не смог прочитать расписание: %s", e)
-            self._remove_job()
+            logger.warning("scheduler.reload: не смог прочитать профили: %s", e)
             return
 
-        self._last_schedule_snapshot = dict(sched_cfg)
-        enabled = bool(sched_cfg.get("enabled"))
-        time_str = (sched_cfg.get("time") or "").strip()
+        # Желаемый набор job'ов: pid -> (hour, minute)
+        desired: Dict[str, Tuple[int, int]] = {}
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for pid, _config, _sub1, schedule in profiles:
+            schedule = schedule or {}
+            snapshot[pid] = dict(schedule)
+            if not bool(schedule.get("enabled")):
+                continue
+            hour, minute = _parse_hhmm((schedule.get("time") or "").strip())
+            if hour is None:
+                logger.warning(
+                    "scheduler: профиль %r — некорректное time=%r, job не создан",
+                    pid, schedule.get("time"),
+                )
+                continue
+            desired[pid] = (hour, minute)
 
-        if not enabled:
-            logger.info("scheduler: выключен (schedule.enabled = false)")
-            self._remove_job()
-            return
+        self._last_snapshot = snapshot
 
-        hour, minute = _parse_hhmm(time_str)
-        if hour is None:
-            logger.warning("scheduler: некорректное schedule.time=%r, job не создан", time_str)
-            self._remove_job()
-            return
+        # Удаляем job'ы брендов, которых больше нет в desired (выключены/удалены).
+        for job in self._scheduler.get_jobs():
+            if job.id.startswith(JOB_PREFIX) and job.id[len(JOB_PREFIX):] not in desired:
+                self._scheduler.remove_job(job.id)
 
-        trigger = CronTrigger(hour=hour, minute=minute, timezone=SAMARA_TZ)
-        self._scheduler.add_job(
-            self._run_job,
-            trigger=trigger,
-            id=JOB_ID,
-            replace_existing=True,
-            coalesce=True,
-            misfire_grace_time=3600,
-        )
+        # Добавляем/обновляем job'ы активных брендов.
+        for pid, (hour, minute) in desired.items():
+            self._scheduler.add_job(
+                self._run_profile_job,
+                trigger=CronTrigger(hour=hour, minute=minute, timezone=SAMARA_TZ),
+                id=f"{JOB_PREFIX}{pid}",
+                args=[pid],
+                replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
+
         logger.info(
-            "scheduler: job зарегистрирован — %02d:%02d Samara, все профили",
-            hour, minute,
+            "scheduler: активных расписаний — %d (%s)",
+            len(desired),
+            ", ".join(f"{pid}@{h:02d}:{m:02d}" for pid, (h, m) in desired.items()) or "нет",
         )
 
     def status(self) -> Dict[str, Any]:
-        job = self._scheduler.get_job(JOB_ID)
+        """Статус по каждому бренду + сводка для шапки."""
+        per_profile: Dict[str, Any] = {}
+        next_runs: List[datetime] = []
+        for job in self._scheduler.get_jobs():
+            if not job.id.startswith(JOB_PREFIX):
+                continue
+            pid = job.id[len(JOB_PREFIX):]
+            nrt = job.next_run_time
+            if nrt:
+                next_runs.append(nrt)
+            per_profile[pid] = {
+                "enabled": True,
+                "next_run": nrt.astimezone(SAMARA_TZ).isoformat(timespec="minutes") if nrt else None,
+                "last_run": self._last_runs.get(pid),
+            }
+        # Бренды без активного job'а, но с историей последнего запуска.
+        for pid, lr in self._last_runs.items():
+            per_profile.setdefault(pid, {"enabled": False, "next_run": None, "last_run": lr})
+
         next_run_iso = None
-        if job and job.next_run_time:
-            next_run_iso = job.next_run_time.astimezone(SAMARA_TZ).isoformat(timespec="minutes")
+        if next_runs:
+            next_run_iso = min(next_runs).astimezone(SAMARA_TZ).isoformat(timespec="minutes")
+
         return {
-            "enabled": job is not None,
+            "enabled": bool(next_runs),
             "next_run": next_run_iso,
             "timezone": "Europe/Samara",
-            "last_run": self._last_run,
+            "profiles": per_profile,
         }
 
-    async def trigger_now(self) -> Dict[str, Any]:
-        """Ручной триггер для тестирования/фронта. Не возвращает до конца работы."""
-        return await self._run_job(manual=True)
-
-    # ------------------------------------------------------------------
-
-    def _remove_job(self) -> None:
-        if self._scheduler.get_job(JOB_ID):
-            self._scheduler.remove_job(JOB_ID)
-
-    def _watch_config(self) -> None:
+    async def trigger_now(self, pid: Optional[str] = None) -> Dict[str, Any]:
+        """Ручной триггер. С pid — один бренд, без — все. Ждёт завершения работы."""
         try:
-            sched_cfg = self._schedule_provider() or {}
+            profiles = self._profiles_provider() or []
         except Exception as e:
-            logger.warning("scheduler.watcher: не смог прочитать расписание: %s", e)
-            return
-        if sched_cfg == self._last_schedule_snapshot:
-            return
-        logger.info(
-            "scheduler: обнаружено изменение расписания (%s -> %s), перерегистрирую job",
-            self._last_schedule_snapshot, sched_cfg,
-        )
-        self.reload()
-
-    async def _run_job(self, manual: bool = False) -> Dict[str, Any]:
-        target_day = _yesterday_samara()
-        label = "manual" if manual else "cron"
-        started_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
-
-        try:
-            profiles = self._profiles_provider()
-        except Exception as e:
-            logger.error("scheduler[%s]: не смог получить профили: %s", label, e, exc_info=True)
+            logger.error("scheduler.trigger_now: не смог получить профили: %s", e, exc_info=True)
             profiles = []
 
-        logger.info("scheduler[%s]: прогон %d профилей за %s", label, len(profiles), target_day)
+        target_day = _yesterday_samara()
+
+        if pid is not None:
+            match = next((t for t in profiles if t[0] == pid), None)
+            if match is None:
+                return {"date": target_day.isoformat(), "trigger": "manual",
+                        "ok": False, "results": [], "error": f"profile not found: {pid}"}
+            res = await self._run_one(match[0], match[1], match[2], target_day, manual=True)
+            return {
+                "date": target_day.isoformat(),
+                "trigger": "manual",
+                "ok": bool(res.get("ok")),
+                "count": 1,
+                "results": [res],
+            }
 
         results: List[Dict[str, Any]] = []
-        for pid, config, sub1 in profiles:
-            try:
-                report = build_report(config, target_day, sub1)
-                out_file = self._output_dir / f"{target_day.isoformat()}_{sub1}__{pid}.json"
-                out_file.parent.mkdir(parents=True, exist_ok=True)
-                out_file.write_text(
-                    json.dumps(report, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                results.append({
-                    "profile_id": pid,
-                    "sub1": sub1,
-                    "ok": True,
-                    "saved_to": out_file.name,
-                    "cabinet_count": report.get("cabinet_count"),
-                    "google_sheets_error": (report.get("google_sheets") or {}).get("error"),
-                })
-                logger.info("scheduler[%s]: профиль %r ok, saved %s", label, pid, out_file.name)
-            except Exception as e:
-                results.append({
-                    "profile_id": pid,
-                    "sub1": sub1,
-                    "ok": False,
-                    "error": f"{type(e).__name__}: {e}",
-                })
-                logger.error("scheduler[%s]: профиль %r упал: %s", label, pid, e, exc_info=True)
-
-        finished_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
-        self._last_run = {
-            "started_at": started_at,
-            "finished_at": finished_at,
+        for p_pid, config, sub1, _schedule in profiles:
+            results.append(await self._run_one(p_pid, config, sub1, target_day, manual=True))
+        return {
             "date": target_day.isoformat(),
-            "trigger": label,
+            "trigger": "manual",
             "ok": bool(results) and all(r["ok"] for r in results),
             "count": len(results),
             "results": results,
         }
-        return self._last_run
+
+    # ------------------------------------------------------------------
+
+    def _watch_config(self) -> None:
+        try:
+            profiles = self._profiles_provider() or []
+        except Exception as e:
+            logger.warning("scheduler.watcher: не смог прочитать профили: %s", e)
+            return
+        snapshot = {pid: dict(schedule or {}) for pid, _c, _s, schedule in profiles}
+        if snapshot == self._last_snapshot:
+            return
+        logger.info("scheduler: обнаружено изменение расписаний, перерегистрирую job'ы")
+        self.reload()
+
+    async def _run_profile_job(self, pid: str) -> Optional[Dict[str, Any]]:
+        """Cron-entrypoint одного бренда: тянет свежий конфиг и собирает отчёт."""
+        try:
+            profiles = self._profiles_provider() or []
+        except Exception as e:
+            logger.error("scheduler: профиль %r — не смог получить конфиг: %s", pid, e, exc_info=True)
+            return None
+        match = next((t for t in profiles if t[0] == pid), None)
+        if match is None:
+            logger.warning("scheduler: профиль %r исчез к моменту запуска job'а", pid)
+            return None
+        return await self._run_one(match[0], match[1], match[2], _yesterday_samara(), manual=False)
+
+    async def _run_one(
+        self, pid: str, config: Dict[str, Any], sub1: str, target_day: date, manual: bool,
+    ) -> Dict[str, Any]:
+        """Собирает один бренд, пишет output + Sheets, сохраняет last_run[pid]."""
+        label = "manual" if manual else "cron"
+        started_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
+        try:
+            report = build_report(config, target_day, sub1)
+            out_file = self._output_dir / f"{target_day.isoformat()}_{sub1}__{pid}.json"
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            result = {
+                "profile_id": pid,
+                "sub1": sub1,
+                "ok": True,
+                "saved_to": out_file.name,
+                "cabinet_count": report.get("cabinet_count"),
+                "google_sheets_error": (report.get("google_sheets") or {}).get("error"),
+            }
+            logger.info("scheduler[%s]: профиль %r ok, saved %s", label, pid, out_file.name)
+        except Exception as e:
+            result = {
+                "profile_id": pid,
+                "sub1": sub1,
+                "ok": False,
+                "error": f"{type(e).__name__}: {e}",
+            }
+            logger.error("scheduler[%s]: профиль %r упал: %s", label, pid, e, exc_info=True)
+
+        result["started_at"] = started_at
+        result["finished_at"] = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
+        result["date"] = target_day.isoformat()
+        result["trigger"] = label
+        self._last_runs[pid] = result
+        return result
 
 
 def _yesterday_samara() -> date:

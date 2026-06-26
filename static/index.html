@@ -7,284 +7,341 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<header>
-  <div class="header-top">
-    <h1>sheetsStat</h1>
-    <nav>
-      <button class="tab-btn active" data-tab="report">Отчёт</button>
-      <button class="tab-btn" data-tab="settings">Настройки</button>
-      <button class="tab-btn" data-tab="history">История</button>
-    </nav>
+<div class="app-shell">
+
+  <!-- SIDEBAR: список брендов -->
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <div class="brand-logo">sheetsStat</div>
+      <input type="search" id="brand-search" placeholder="Поиск бренда…" autocomplete="off">
+    </div>
+    <div id="brand-list" class="brand-list"></div>
+    <div class="sidebar-actions">
+      <button class="secondary" id="profile-add" title="Создать бренд">＋ Бренд</button>
+      <button class="secondary" id="profile-copy" title="Копировать выбранный">⧉</button>
+      <button class="secondary" id="profile-rename" title="Переименовать выбранный">✎</button>
+      <button class="danger" id="profile-delete" title="Удалить выбранный">🗑</button>
+    </div>
+  </aside>
+
+  <!-- WORKSPACE -->
+  <div class="workspace">
+    <header class="workspace-head">
+      <nav>
+        <button class="tab-btn active" data-tab="overview">Обзор</button>
+        <button class="tab-btn" data-tab="report">Отчёт</button>
+        <button class="tab-btn" data-tab="settings">Настройки</button>
+        <button class="tab-btn" data-tab="history">История</button>
+      </nav>
+      <div class="active-brand" id="active-brand-label"></div>
+    </header>
+
+    <main>
+      <!-- TAB: OVERVIEW (дашборд всех брендов) -->
+      <section id="tab-overview" class="tab active">
+        <div class="card">
+          <div class="flex-between">
+            <h2>Обзор брендов</h2>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button id="overview-reload" class="secondary" type="button">Обновить</button>
+              <button id="overview-run-all" class="primary" type="button">Прогнать все за вчера</button>
+            </div>
+          </div>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            Каждый бренд собирается в свою таблицу со своим <code>sub1</code> и
+            <b>в своё время</b> (Samara). Тумблер и время можно править прямо здесь.
+          </p>
+          <p id="overview-status" class="status" style="margin-left:0;"></p>
+          <div class="table-wrap">
+            <table id="overview-table">
+              <thead>
+                <tr>
+                  <th>Бренд</th>
+                  <th>sub1</th>
+                  <th>Sheets</th>
+                  <th>Расписание</th>
+                  <th>Время</th>
+                  <th>Следующий</th>
+                  <th>Последний запуск</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: REPORT -->
+      <section id="tab-report" class="tab">
+        <div class="card">
+          <h2>Сгенерировать отчёт за день</h2>
+          <form id="report-form" class="grid">
+            <label>Дата
+              <input type="date" id="report-date" required>
+            </label>
+            <label>sub1 / leadstechLabel
+              <input type="text" id="report-sub1" placeholder="kub" required>
+            </label>
+            <button type="submit" class="primary">Сгенерировать</button>
+          </form>
+          <p id="report-status" class="status"></p>
+        </div>
+
+        <div id="report-result" class="card hidden">
+          <h2>Результат</h2>
+          <div id="report-summary"></div>
+          <div id="report-gs" class="status" style="margin-bottom:8px;"></div>
+
+          <h3>Ads Manager</h3>
+          <table id="cabinets-table">
+            <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
+            <tbody></tbody>
+            <tfoot><tr><th>Total</th><th class="num" id="ads-total">—</th></tr></tfoot>
+          </table>
+
+          <h3>Yandex Direct (с НДС)</h3>
+          <table id="yandex-table">
+            <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
+            <tbody></tbody>
+            <tfoot><tr><th>Total</th><th class="num" id="yandex-total">—</th></tr></tfoot>
+          </table>
+
+          <h3>Yandex Metrika</h3>
+          <table id="metrika-totals-table">
+            <tbody>
+              <tr><th>Визиты</th><td class="num" id="ym-visits-total">—</td></tr>
+              <tr><th>Просмотры</th><td class="num" id="ym-pageviews-total">—</td></tr>
+              <tr><th>Посетители</th><td class="num" id="ym-users-total">—</td></tr>
+            </tbody>
+          </table>
+          <table id="metrika-table">
+            <thead>
+              <tr><th>Цель</th><th class="num">Достижения</th><th class="num">Целевые визиты</th><th class="num">CR, %</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+
+          <h3>LeadsTech</h3>
+          <table id="leadstech-table">
+            <tbody>
+              <tr><th>Клики (uniques)</th><td class="num" id="lt-clicks">—</td></tr>
+              <tr><th>Хосты</th><td class="num" id="lt-hosts">—</td></tr>
+              <tr><th>Сумма (sumwebmaster)</th><td class="num" id="lt-sum">—</td></tr>
+              <tr><th>Конверсии / approved / rejected</th><td class="num" id="lt-conv">—</td></tr>
+            </tbody>
+          </table>
+
+          <h3>8connect</h3>
+          <table id="eightconnect-table">
+            <tbody>
+              <tr><th>Расход (→ AC)</th><td class="num" id="ec-cost">—</td></tr>
+              <tr><th>Доход (→ AE)</th><td class="num" id="ec-charge">—</td></tr>
+              <tr><th>Scheme IDs</th><td class="num" id="ec-scheme-list">—</td></tr>
+            </tbody>
+          </table>
+          <div id="ec-error" class="status err" style="margin-top:4px;"></div>
+
+          <details>
+            <summary>Сырой JSON</summary>
+            <pre id="report-raw"></pre>
+          </details>
+        </div>
+      </section>
+
+      <!-- TAB: SETTINGS -->
+      <section id="tab-settings" class="tab">
+        <div class="card">
+          <h2>Бренд: <span id="settings-profile-name">—</span></h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            Настройки ниже относятся к выбранному в списке слева бренду.
+            Создать/копировать/переименовать/удалить — кнопки под списком брендов.
+          </p>
+          <div class="grid two">
+            <label>sub1 / LeadsTech label бренда
+              <input type="text" id="profile-sub1" placeholder="напр. kub">
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Расписание этого бренда</h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            В заданное время (Samara) собирается отчёт за <b>предыдущий день</b>
+            и пишется в <code>output/</code> + Google Sheets. У каждого бренда —
+            своё время, независимо от остальных. Повторный запуск в ту же дату перезаписывает данные.
+          </p>
+          <div class="grid two">
+            <label style="display:flex; align-items:center; gap:8px; text-transform:none;">
+              <input type="checkbox" id="brand-sched-enabled"> Включить автозапуск
+            </label>
+            <label>Время (HH:MM, Samara)
+              <input type="text" id="brand-sched-time" value="09:00" placeholder="09:00">
+            </label>
+          </div>
+          <div style="margin-top:10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <button id="brand-sched-save" class="primary" type="button">Сохранить расписание</button>
+            <button id="brand-sched-run" class="secondary" type="button">Прогнать этот бренд за вчера</button>
+            <span id="brand-sched-status" class="status"></span>
+          </div>
+          <p id="brand-sched-info" class="status" style="margin-top:10px;"></p>
+        </div>
+
+        <div class="card">
+          <h2>Ads Manager</h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            Логин/пароль твоего аккаунта в Ads Manager. sheetsStat авторизуется через
+            <code>/api/auth/login</code>, получает JWT и дёргает расход по кабинетам —
+            никакие VK-токены здесь не хранятся.
+          </p>
+          <div class="grid two">
+            <label>Base URL
+              <input type="text" id="am-base-url" placeholder="https://kybyshka-dev.ru">
+            </label>
+            <label>Username
+              <input type="text" id="am-username" autocomplete="off">
+            </label>
+            <label>Password
+              <input type="password" id="am-password" autocomplete="off">
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Yandex Direct (ads_manager_Yandex)</h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            Логин/пароль пользователя в ads_manager_Yandex. sheetsStat авторизуется через
+            <code>/api/auth/login</code> и собирает расход с НДС по всем активным
+            кабинетам этого пользователя.
+          </p>
+          <div class="grid two">
+            <label>Base URL
+              <input type="text" id="yx-base-url" placeholder="https://...">
+            </label>
+            <label>Username
+              <input type="text" id="yx-username" autocomplete="off">
+            </label>
+            <label>Password
+              <input type="password" id="yx-password" autocomplete="off">
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Yandex Metrika</h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            OAuth-токен Яндекса (единый для всех сервисов), ID счётчика и имя цели.
+            sheetsStat дёргает Metrika Reports API напрямую и возвращает
+            «Достижения цели», «Целевые визиты» и «Конверсию» за день.
+          </p>
+          <div class="grid two">
+            <label>OAuth Token
+              <input type="password" id="ym-oauth-token" autocomplete="off" placeholder="y0_Ag...">
+            </label>
+            <label>Counter ID
+              <input type="number" id="ym-counter-id" placeholder="94076940" min="0">
+            </label>
+            <label>Attribution
+              <input type="text" id="ym-attribution" value="LASTSIGN">
+            </label>
+            <label style="grid-column: 1 / -1;">Goals (через запятую, имена из Метрики)
+              <input type="text" id="ym-goals" value="Zayvka"
+                     placeholder="Zayvka, Offer Click, Одобрение, В работе, Отклон">
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>LeadsTech</h2>
+          <div class="grid two">
+            <label>Login
+              <input type="text" id="lt-login" autocomplete="off">
+            </label>
+            <label>Password
+              <input type="password" id="lt-password" autocomplete="off">
+            </label>
+            <label>Base URL
+              <input type="text" id="lt-base-url" value="https://api.leads.tech">
+            </label>
+            <label>Page size
+              <input type="number" id="lt-page-size" value="500" min="1">
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>8connect</h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            Логин/пароль 8connect. sheetsStat авторизуется через
+            <code>/api/auth/login</code>, дёргает <code>/api/report/list</code> за день
+            по указанным ID схем и суммирует <b>расход</b> (пишется в колонку AC —
+            слагаемое формулы «Затраты» D) и <b>доход</b> (пишется в AE).
+          </p>
+          <div class="grid two">
+            <label>Login
+              <input type="text" id="ec-login" autocomplete="off">
+            </label>
+            <label>Password
+              <input type="password" id="ec-password" autocomplete="off">
+            </label>
+            <label style="grid-column: 1 / -1;">Category IDs (фильтр на API, через запятую)
+              <input type="text" id="ec-category-ids"
+                     placeholder="149, 395, 620, 624">
+            </label>
+            <label style="grid-column: 1 / -1;">Scheme IDs (опционально, пусто = все схемы категорий)
+              <input type="text" id="ec-scheme-ids"
+                     placeholder="1006, 2260, 2805, 2809, 612">
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Google Sheets</h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            Запись отчёта в таблицу: фикс. ячейки C/E/F/G/AI по строке даты,
+            расходы кабинетов — в колонки по названию из <code>AR2:CL2</code>,
+            остаток — в <code>A37↓/B37↓</code>. Вкладка выбирается по месяцу
+            («Апрель 26»). Раскладка одинаковая у всех брендов — у нового бренда
+            таблица должна быть копией шаблона.
+          </p>
+          <div class="grid two">
+            <label style="grid-column: 1 / -1;">Ссылка на таблицу или Spreadsheet ID
+              <input type="text" id="gs-spreadsheet-id"
+                     placeholder="https://docs.google.com/spreadsheets/d/... или просто ID">
+              <small id="gs-link" style="color: var(--muted); font-size: 12px; margin-top: 4px; display:block;"></small>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; text-transform:none;">
+              <input type="checkbox" id="gs-enabled"> Включить запись в Sheets
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <button id="save-config" class="primary">Сохранить настройки</button>
+          <span id="save-status" class="status"></span>
+        </div>
+      </section>
+
+      <!-- TAB: HISTORY -->
+      <section id="tab-history" class="tab">
+        <div class="card">
+          <div class="flex-between">
+            <h2>Сохранённые отчёты</h2>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="history-brand-filter" class="select"><option value="">Все бренды</option></select>
+              <button id="history-reload" class="secondary">Обновить</button>
+            </div>
+          </div>
+          <table id="history-table">
+            <thead><tr><th>Файл</th><th>Размер</th><th>Время</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <pre id="history-preview" class="hidden"></pre>
+        </div>
+      </section>
+    </main>
   </div>
-  <div id="profile-bar" class="profile-bar"></div>
-</header>
-
-<main>
-  <!-- TAB: REPORT -->
-  <section id="tab-report" class="tab active">
-    <div class="card">
-      <h2>Сгенерировать отчёт за день</h2>
-      <form id="report-form" class="grid">
-        <label>Дата
-          <input type="date" id="report-date" required>
-        </label>
-        <label>sub1 / leadstechLabel
-          <input type="text" id="report-sub1" value="kub" required>
-        </label>
-        <button type="submit" class="primary">Сгенерировать</button>
-      </form>
-      <p id="report-status" class="status"></p>
-    </div>
-
-    <div id="report-result" class="card hidden">
-      <h2>Результат</h2>
-      <div id="report-summary"></div>
-      <div id="report-gs" class="status" style="margin-bottom:8px;"></div>
-
-      <h3>Ads Manager</h3>
-      <table id="cabinets-table">
-        <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
-        <tbody></tbody>
-        <tfoot><tr><th>Total</th><th class="num" id="ads-total">—</th></tr></tfoot>
-      </table>
-
-      <h3>Yandex Direct (с НДС)</h3>
-      <table id="yandex-table">
-        <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
-        <tbody></tbody>
-        <tfoot><tr><th>Total</th><th class="num" id="yandex-total">—</th></tr></tfoot>
-      </table>
-
-      <h3>Yandex Metrika</h3>
-      <table id="metrika-totals-table">
-        <tbody>
-          <tr><th>Визиты</th><td class="num" id="ym-visits-total">—</td></tr>
-          <tr><th>Просмотры</th><td class="num" id="ym-pageviews-total">—</td></tr>
-          <tr><th>Посетители</th><td class="num" id="ym-users-total">—</td></tr>
-        </tbody>
-      </table>
-      <table id="metrika-table">
-        <thead>
-          <tr><th>Цель</th><th class="num">Достижения</th><th class="num">Целевые визиты</th><th class="num">CR, %</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-
-      <h3>LeadsTech</h3>
-      <table id="leadstech-table">
-        <tbody>
-          <tr><th>Клики (uniques)</th><td class="num" id="lt-clicks">—</td></tr>
-          <tr><th>Хосты</th><td class="num" id="lt-hosts">—</td></tr>
-          <tr><th>Сумма (sumwebmaster)</th><td class="num" id="lt-sum">—</td></tr>
-          <tr><th>Конверсии / approved / rejected</th><td class="num" id="lt-conv">—</td></tr>
-        </tbody>
-      </table>
-
-      <h3>8connect</h3>
-      <table id="eightconnect-table">
-        <tbody>
-          <tr><th>Расход (→ AC)</th><td class="num" id="ec-cost">—</td></tr>
-          <tr><th>Доход (→ AE)</th><td class="num" id="ec-charge">—</td></tr>
-          <tr><th>Scheme IDs</th><td class="num" id="ec-scheme-list">—</td></tr>
-        </tbody>
-      </table>
-      <div id="ec-error" class="status err" style="margin-top:4px;"></div>
-
-      <details>
-        <summary>Сырой JSON</summary>
-        <pre id="report-raw"></pre>
-      </details>
-    </div>
-  </section>
-
-  <!-- TAB: SETTINGS -->
-  <section id="tab-settings" class="tab">
-    <div class="card">
-      <h2>Профиль: <span id="settings-profile-name">—</span></h2>
-      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        Все настройки ниже относятся к активному профилю (выбран во вкладках вверху).
-        Создать/копировать/переименовать/удалить профиль — кнопки на полосе профилей.
-      </p>
-      <div class="grid two">
-        <label>sub1 / LeadsTech label профиля
-          <input type="text" id="profile-sub1" value="kub" placeholder="kub">
-        </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Ads Manager</h2>
-      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        Логин/пароль твоего аккаунта в Ads Manager. sheetsStat авторизуется через
-        <code>/api/auth/login</code>, получает JWT и дёргает расход по кабинетам —
-        никакие VK-токены здесь не хранятся.
-      </p>
-      <div class="grid two">
-        <label>Base URL
-          <input type="text" id="am-base-url" placeholder="https://kybyshka-dev.ru">
-        </label>
-        <label>Username
-          <input type="text" id="am-username" autocomplete="off">
-        </label>
-        <label>Password
-          <input type="password" id="am-password" autocomplete="off">
-        </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Yandex Direct (ads_manager_Yandex)</h2>
-      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        Логин/пароль пользователя в ads_manager_Yandex. sheetsStat авторизуется через
-        <code>/api/auth/login</code> и собирает расход с НДС по всем активным
-        кабинетам этого пользователя.
-      </p>
-      <div class="grid two">
-        <label>Base URL
-          <input type="text" id="yx-base-url" placeholder="https://...">
-        </label>
-        <label>Username
-          <input type="text" id="yx-username" autocomplete="off">
-        </label>
-        <label>Password
-          <input type="password" id="yx-password" autocomplete="off">
-        </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Yandex Metrika</h2>
-      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        OAuth-токен Яндекса (единый для всех сервисов), ID счётчика и имя цели.
-        sheetsStat дёргает Metrika Reports API напрямую и возвращает
-        «Достижения цели», «Целевые визиты» и «Конверсию» за день.
-      </p>
-      <div class="grid two">
-        <label>OAuth Token
-          <input type="password" id="ym-oauth-token" autocomplete="off" placeholder="y0_Ag...">
-        </label>
-        <label>Counter ID
-          <input type="number" id="ym-counter-id" placeholder="94076940" min="0">
-        </label>
-        <label>Attribution
-          <input type="text" id="ym-attribution" value="LASTSIGN">
-        </label>
-        <label style="grid-column: 1 / -1;">Goals (через запятую, имена из Метрики)
-          <input type="text" id="ym-goals" value="Zayvka"
-                 placeholder="Zayvka, Offer Click, Одобрение, В работе, Отклон">
-        </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>LeadsTech</h2>
-      <div class="grid two">
-        <label>Login
-          <input type="text" id="lt-login" autocomplete="off">
-        </label>
-        <label>Password
-          <input type="password" id="lt-password" autocomplete="off">
-        </label>
-        <label>Base URL
-          <input type="text" id="lt-base-url" value="https://api.leads.tech">
-        </label>
-        <label>Page size
-          <input type="number" id="lt-page-size" value="500" min="1">
-        </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>8connect</h2>
-      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        Логин/пароль 8connect. sheetsStat авторизуется через
-        <code>/api/auth/login</code>, дёргает <code>/api/report/list</code> за день
-        по указанным ID схем и суммирует <b>расход</b> (пишется в колонку AC —
-        слагаемое формулы «Затраты» D) и <b>доход</b> (пишется в AE).
-      </p>
-      <div class="grid two">
-        <label>Login
-          <input type="text" id="ec-login" autocomplete="off">
-        </label>
-        <label>Password
-          <input type="password" id="ec-password" autocomplete="off">
-        </label>
-        <label style="grid-column: 1 / -1;">Category IDs (фильтр на API, через запятую)
-          <input type="text" id="ec-category-ids"
-                 placeholder="149, 395, 620, 624">
-        </label>
-        <label style="grid-column: 1 / -1;">Scheme IDs (опционально, пусто = все схемы категорий)
-          <input type="text" id="ec-scheme-ids"
-                 placeholder="1006, 2260, 2805, 2809, 612">
-        </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Расписание (общее для всех профилей)</h2>
-      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        Одно общее время. В этот момент по очереди собираются отчёты за предыдущий день
-        по <b>всем</b> профилям (каждый в свою таблицу со своим sub1) и пишутся в
-        <code>output/</code> + Google Sheets. Повторный запуск в ту же дату перезаписывает данные.
-      </p>
-      <div class="grid two">
-        <label style="display:flex; align-items:center; gap:8px;">
-          <input type="checkbox" id="sched-enabled"> Включить автозапуск
-        </label>
-        <label>Время (HH:MM, Samara)
-          <input type="text" id="sched-time" value="09:00" placeholder="09:00">
-        </label>
-      </div>
-      <div style="margin-top:10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-        <button id="sched-save" class="primary" type="button">Сохранить расписание</button>
-        <span id="sched-save-status" class="status"></span>
-      </div>
-      <p id="sched-status" class="status" style="margin-top:10px;"></p>
-      <button id="sched-run-now" class="secondary" type="button">Прогнать все профили за вчера</button>
-      <span id="sched-run-status" class="status"></span>
-    </div>
-
-    <div class="card">
-      <h2>Google Sheets</h2>
-      <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-        Запись отчёта в таблицу: фикс. ячейки C/E/F/G/AI по строке даты,
-        расходы кабинетов — в колонки по названию из <code>AR2:CL2</code>,
-        остаток — в <code>A37↓/B37↓</code>. Вкладка выбирается по месяцу
-        («Апрель 26»).
-      </p>
-      <div class="grid two">
-        <label style="grid-column: 1 / -1;">Ссылка на таблицу или Spreadsheet ID
-          <input type="text" id="gs-spreadsheet-id"
-                 placeholder="https://docs.google.com/spreadsheets/d/... или просто ID">
-          <small id="gs-link" style="color: var(--muted); font-size: 12px; margin-top: 4px; display:block;"></small>
-        </label>
-        <label style="display:flex; align-items:center; gap:8px;">
-          <input type="checkbox" id="gs-enabled"> Включить запись в Sheets
-        </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <button id="save-config" class="primary">Сохранить настройки</button>
-      <span id="save-status" class="status"></span>
-    </div>
-  </section>
-
-  <!-- TAB: HISTORY -->
-  <section id="tab-history" class="tab">
-    <div class="card">
-      <div class="flex-between">
-        <h2>Сохранённые отчёты</h2>
-        <button id="history-reload" class="secondary">Обновить</button>
-      </div>
-      <table id="history-table">
-        <thead><tr><th>Файл</th><th>Размер</th><th>Время</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <pre id="history-preview" class="hidden"></pre>
-    </div>
-  </section>
-</main>
+</div>
 
 <script src="/app.js"></script>
 </body>

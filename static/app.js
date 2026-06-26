@@ -1,8 +1,9 @@
-// ------ Tabs ------
+// ============================== Tabs ==============================
 function activateTab(name) {
   document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   document.getElementById(`tab-${name}`).classList.add("active");
+  if (name === "overview") renderOverview();
   if (name === "settings") loadConfig();
   if (name === "history") loadHistory();
 }
@@ -11,9 +12,10 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => activateTab(btn.dataset.tab));
 });
 
-// ------ Profiles ------
+// ============================== Profiles (бренды) ==============================
 let _activeProfileId = null;
-let _profilesState = [];   // [{id, name, sub1, is_active}]
+let _profilesState = [];   // [{id, name, sub1, is_active, schedule, sheets_enabled, next_run, last_run}]
+let _brandQuery = "";
 
 function activeProfile() {
   return _profilesState.find(p => p.id === _activeProfileId) || null;
@@ -24,47 +26,222 @@ async function loadProfiles() {
     const r = await fetch("/api/profiles");
     const data = await r.json();
     _profilesState = data.profiles || [];
-    _activeProfileId = data.active_id || (_profilesState[0] && _profilesState[0].id) || null;
+    if (!_profilesState.some(p => p.id === _activeProfileId)) {
+      _activeProfileId = data.active_id || (_profilesState[0] && _profilesState[0].id) || null;
+    }
   } catch {
     _profilesState = [];
     _activeProfileId = null;
   }
-  renderProfileBar();
+  renderSidebar();
+  renderOverview();
+  renderActiveBrandLabel();
   prefillReportSub1();
 }
 
-function renderProfileBar() {
-  const bar = document.getElementById("profile-bar");
-  bar.innerHTML = "";
-  _profilesState.forEach(p => {
-    const btn = document.createElement("button");
-    btn.className = "profile-btn" + (p.id === _activeProfileId ? " active" : "");
-    btn.textContent = p.name;
-    btn.title = `sub1=${p.sub1}`;
-    btn.addEventListener("click", () => activateProfile(p.id));
-    bar.appendChild(btn);
-  });
-
-  const actions = document.createElement("span");
-  actions.className = "profile-actions";
-  const last = _profilesState.length <= 1;
-  actions.innerHTML = `
-    <button class="secondary" id="profile-add" title="Создать профиль">＋</button>
-    <button class="secondary" id="profile-copy" title="Копировать активный профиль">⧉</button>
-    <button class="secondary" id="profile-rename" title="Переименовать активный">✎</button>
-    <button class="danger" id="profile-delete" title="Удалить активный"${last ? " disabled" : ""}>🗑</button>`;
-  bar.appendChild(actions);
-
-  document.getElementById("profile-add").addEventListener("click", () => createProfile(false));
-  document.getElementById("profile-copy").addEventListener("click", () => createProfile(true));
-  document.getElementById("profile-rename").addEventListener("click", renameActiveProfile);
-  document.getElementById("profile-delete").addEventListener("click", deleteActiveProfile);
+function renderActiveBrandLabel() {
+  const el = document.getElementById("active-brand-label");
+  const p = activeProfile();
+  el.textContent = p ? `Бренд: ${p.name}` : "";
 }
 
-function prefillReportSub1() {
-  const p = activeProfile();
-  const el = document.getElementById("report-sub1");
-  if (p && el) el.value = p.sub1 || "kub";
+// ---------- Sidebar: список брендов ----------
+function renderSidebar() {
+  const list = document.getElementById("brand-list");
+  list.innerHTML = "";
+  const q = _brandQuery.trim().toLowerCase();
+  const items = _profilesState.filter(p =>
+    !q || (p.name || "").toLowerCase().includes(q) || (p.sub1 || "").toLowerCase().includes(q));
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "brand-empty";
+    empty.textContent = _profilesState.length ? "Ничего не найдено" : "Нет брендов";
+    list.appendChild(empty);
+    return;
+  }
+
+  items.forEach(p => {
+    const item = document.createElement("button");
+    item.className = "brand-item" + (p.id === _activeProfileId ? " active" : "");
+    item.dataset.pid = p.id;
+    item.title = "ПКМ — переименовать / копировать / удалить";
+    item.addEventListener("click", () => activateProfile(p.id));
+
+    const sched = p.schedule || {};
+    const schedBadge = sched.enabled
+      ? `<span class="badge sched-on">⏰ ${escapeHtml(sched.time || "")}</span>`
+      : `<span class="badge sched-off">выкл</span>`;
+    const sheetsDot = p.sheets_enabled
+      ? `<span class="dot dot-sheets" title="Запись в Sheets включена"></span>` : "";
+    const runDot = lastRunDot(p.last_run);
+
+    item.innerHTML = `
+      <div class="brand-item-main">
+        <span class="brand-name">${escapeHtml(p.name || p.id)}</span>
+        ${runDot}${sheetsDot}
+      </div>
+      <div class="brand-item-sub">
+        <span class="brand-sub1">${p.sub1 ? escapeHtml(p.sub1) : "— sub1 не задан"}</span>
+        ${schedBadge}
+      </div>`;
+    list.appendChild(item);
+  });
+}
+
+document.getElementById("brand-search").addEventListener("input", (e) => {
+  _brandQuery = e.target.value || "";
+  renderSidebar();
+});
+
+// ---------- Overview: дашборд всех брендов ----------
+function renderOverview() {
+  const tbody = document.querySelector("#overview-table tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  if (!_profilesState.length) {
+    tbody.innerHTML = `<tr><td colspan="8" style="color: var(--muted);">Брендов пока нет. Создай первый кнопкой «＋ Бренд».</td></tr>`;
+    return;
+  }
+  _profilesState.forEach(p => {
+    const sched = p.schedule || { enabled: false, time: "09:00" };
+    const tr = document.createElement("tr");
+    if (p.id === _activeProfileId) tr.classList.add("row-active");
+
+    tr.innerHTML = `
+      <td><button class="link-btn" data-open="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</button></td>
+      <td>${p.sub1 ? escapeHtml(p.sub1) : '<span class="muted">—</span>'}</td>
+      <td>${p.sheets_enabled ? '<span class="dot dot-sheets"></span>' : '<span class="muted">—</span>'}</td>
+      <td><label class="switch"><input type="checkbox" ${sched.enabled ? "checked" : ""} data-toggle="${escapeHtml(p.id)}"><span class="slider"></span></label></td>
+      <td><input type="text" class="time-input" value="${escapeHtml(sched.time || "09:00")}" data-time="${escapeHtml(p.id)}"></td>
+      <td class="nowrap">${fmtNextRun(p.next_run)}</td>
+      <td>${lastRunCell(p.last_run)}</td>
+      <td><button class="secondary sm" data-run="${escapeHtml(p.id)}">▶ вчера</button></td>`;
+    tbody.appendChild(tr);
+  });
+
+  // открыть настройки бренда
+  tbody.querySelectorAll("[data-open]").forEach(b =>
+    b.addEventListener("click", () => { activateProfile(b.dataset.open); activateTab("settings"); }));
+  // прогнать один бренд за вчера
+  tbody.querySelectorAll("[data-run]").forEach(b =>
+    b.addEventListener("click", () => runBrandNow(b.dataset.run)));
+  // тумблер расписания
+  tbody.querySelectorAll("[data-toggle]").forEach(cb =>
+    cb.addEventListener("change", () => {
+      const pid = cb.dataset.toggle;
+      const timeEl = tbody.querySelector(`[data-time="${CSS.escape(pid)}"]`);
+      saveScheduleInline(pid, cb.checked, (timeEl && timeEl.value) || "09:00");
+    }));
+  // правка времени (по Enter/blur)
+  tbody.querySelectorAll("[data-time]").forEach(inp => {
+    const commit = () => {
+      const pid = inp.dataset.time;
+      const toggleEl = tbody.querySelector(`[data-toggle="${CSS.escape(pid)}"]`);
+      saveScheduleInline(pid, !!(toggleEl && toggleEl.checked), inp.value.trim());
+    };
+    inp.addEventListener("blur", commit);
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+  });
+}
+
+async function saveScheduleInline(pid, enabled, time) {
+  const status = document.getElementById("overview-status");
+  status.textContent = "Сохраняю расписание…";
+  status.className = "status";
+  try {
+    const r = await fetch(`/api/profiles/${encodeURIComponent(pid)}/schedule`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !!enabled, time: time || "09:00" }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+    status.textContent = "✅ Расписание сохранено";
+    status.className = "status ok";
+    await loadProfiles();
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+}
+
+async function runBrandNow(pid) {
+  const status = document.getElementById("overview-status");
+  const p = _profilesState.find(x => x.id === pid);
+  status.textContent = `Прогоняю «${p ? p.name : pid}» за вчера…`;
+  status.className = "status";
+  try {
+    const r = await fetch("/api/schedule/run-now", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: pid }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+    const res = (data.results || [])[0] || {};
+    if (res.ok) {
+      status.textContent = `✅ «${p ? p.name : pid}» (${data.date}): ${res.saved_to || "ok"}${res.google_sheets_error ? ` · Sheets: ${res.google_sheets_error}` : ""}`;
+      status.className = res.google_sheets_error ? "status err" : "status ok";
+    } else {
+      status.textContent = `❌ «${p ? p.name : pid}»: ${res.error || data.error || "ошибка"}`;
+      status.className = "status err";
+    }
+    await loadProfiles();
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+}
+
+document.getElementById("overview-reload").addEventListener("click", loadProfiles);
+document.getElementById("overview-run-all").addEventListener("click", async () => {
+  const status = document.getElementById("overview-status");
+  status.textContent = "Прогоняю все бренды за вчера…";
+  status.className = "status";
+  try {
+    const r = await fetch("/api/schedule/run-now", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+    const results = data.results || [];
+    const okN = results.filter(x => x.ok).length;
+    const failN = results.length - okN;
+    status.textContent = `✅ Готово (${data.date}): ${okN} ок${failN ? `, ${failN} с ошибкой` : ""}`;
+    status.className = failN ? "status err" : "status ok";
+    await loadProfiles();
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+});
+
+// ---------- helpers статуса ----------
+function fmtNextRun(iso) {
+  if (!iso) return '<span class="muted">—</span>';
+  // "2026-06-27T09:00+04:00" → "27.06 09:00"
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return escapeHtml(iso);
+  return `${m[3]}.${m[2]} ${m[4]}:${m[5]}`;
+}
+
+function lastRunWhen(lr) {
+  const t = (lr && (lr.finished_at || lr.started_at)) || "";
+  const m = t.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  return m ? `${m[3]}.${m[2]} ${m[4]}:${m[5]}` : "";
+}
+
+function lastRunDot(lr) {
+  if (!lr) return `<span class="dot dot-none" title="ещё не запускался"></span>`;
+  if (lr.ok) return `<span class="dot dot-ok" title="последний запуск ок"></span>`;
+  return `<span class="dot dot-err" title="последний запуск с ошибкой"></span>`;
+}
+
+function lastRunCell(lr) {
+  if (!lr) return '<span class="muted">—</span>';
+  const when = lastRunWhen(lr);
+  if (lr.ok) {
+    const warn = lr.google_sheets_error ? ` <span class="status err" style="margin:0; font-size:11px;">Sheets!</span>` : "";
+    return `<span class="status ok" style="margin:0;">✅ ${when}</span>${warn}`;
+  }
+  return `<span class="status err" style="margin:0;" title="${escapeHtml(lr.error || "")}">❌ ${when}</span>`;
 }
 
 async function activateProfile(id) {
@@ -73,18 +250,25 @@ async function activateProfile(id) {
     await fetch(`/api/profiles/${encodeURIComponent(id)}/activate`, { method: "POST" });
   } catch {}
   _activeProfileId = id;
-  renderProfileBar();
+  renderSidebar();
+  renderOverview();
+  renderActiveBrandLabel();
   prefillReportSub1();
   if (document.getElementById("tab-settings").classList.contains("active")) loadConfig();
 }
 
-async function createProfile(copy) {
-  const p = activeProfile();
-  const def = copy ? `${p ? p.name : "Профиль"} (копия)` : "Новый профиль";
-  const name = prompt(copy ? "Имя нового профиля (копия активного):" : "Имя нового профиля:", def);
+// ---------- CRUD брендов (действия адресуются конкретному pid) ----------
+function profileById(pid) {
+  return _profilesState.find(p => p.id === pid) || null;
+}
+
+async function createProfile(copy, sourcePid) {
+  const src = copy ? profileById(sourcePid || _activeProfileId) : null;
+  const def = copy ? `${src ? src.name : "Бренд"} (копия)` : "Новый бренд";
+  const name = prompt(copy ? "Имя нового бренда (копия):" : "Имя нового бренда:", def);
   if (!name || !name.trim()) return;
   const body = { name: name.trim() };
-  if (copy && _activeProfileId) body.copy_from = _activeProfileId;
+  if (copy && src) body.copy_from = src.id;
   try {
     const r = await fetch("/api/profiles", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -92,20 +276,21 @@ async function createProfile(copy) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || "Ошибка");
-    await loadProfiles();   // бэкенд уже сделал новый профиль активным
+    _activeProfileId = data.id || data.active_id || _activeProfileId;
+    await loadProfiles();
     activateTab("settings");
   } catch (e) {
     alert("❌ " + e.message);
   }
 }
 
-async function renameActiveProfile() {
-  const p = activeProfile();
+async function renameProfile(pid) {
+  const p = profileById(pid);
   if (!p) return;
-  const name = prompt("Новое имя профиля:", p.name);
+  const name = prompt("Новое имя бренда:", p.name);
   if (!name || !name.trim()) return;
   try {
-    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}`, {
+    const r = await fetch(`/api/profiles/${encodeURIComponent(pid)}`, {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: name.trim() }),
     });
@@ -117,14 +302,17 @@ async function renameActiveProfile() {
   }
 }
 
-async function deleteActiveProfile() {
-  if (_profilesState.length <= 1) return;
-  const p = activeProfile();
-  if (!confirm(`Удалить профиль «${p ? p.name : _activeProfileId}»? Это необратимо.`)) return;
+async function deleteProfile(pid) {
+  if (!pid) return;
+  if (_profilesState.length <= 1) { alert("Нельзя удалить последний бренд."); return; }
+  const p = profileById(pid);
+  if (!confirm(`Удалить бренд «${p ? p.name : pid}»? Это необратимо.`)) return;
   try {
-    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}`, { method: "DELETE" });
+    const r = await fetch(`/api/profiles/${encodeURIComponent(pid)}`, { method: "DELETE" });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || "Ошибка");
+    // backend меняет active_id только если удалили активный — берём его как есть
+    _activeProfileId = data.active_id || null;
     await loadProfiles();
     if (document.getElementById("tab-settings").classList.contains("active")) loadConfig();
   } catch (e) {
@@ -132,7 +320,68 @@ async function deleteActiveProfile() {
   }
 }
 
-// ------ Report ------
+document.getElementById("profile-add").addEventListener("click", () => createProfile(false));
+document.getElementById("profile-copy").addEventListener("click", () => createProfile(true, _activeProfileId));
+document.getElementById("profile-rename").addEventListener("click", () => renameProfile(_activeProfileId));
+document.getElementById("profile-delete").addEventListener("click", () => deleteProfile(_activeProfileId));
+
+// ---------- Контекстное меню бренда (ПКМ) ----------
+const _brandMenu = document.createElement("div");
+_brandMenu.id = "brand-menu";
+_brandMenu.className = "ctx-menu hidden";
+document.body.appendChild(_brandMenu);
+let _menuPid = null;
+
+function openBrandMenu(x, y, pid) {
+  _menuPid = pid;
+  const p = profileById(pid);
+  const last = _profilesState.length <= 1;
+  _brandMenu.innerHTML = `
+    <div class="ctx-title">${escapeHtml(p ? (p.name || p.id) : pid)}</div>
+    <button class="ctx-item" data-act="rename">✎ Переименовать</button>
+    <button class="ctx-item" data-act="copy">⧉ Копировать</button>
+    <button class="ctx-item danger" data-act="delete"${last ? " disabled" : ""}>🗑 Удалить</button>`;
+  _brandMenu.classList.remove("hidden");
+  // позиционируем с учётом краёв экрана (после снятия hidden — размеры известны)
+  const rect = _brandMenu.getBoundingClientRect();
+  const px = Math.min(x, window.innerWidth - rect.width - 8);
+  const py = Math.min(y, window.innerHeight - rect.height - 8);
+  _brandMenu.style.left = `${Math.max(8, px)}px`;
+  _brandMenu.style.top = `${Math.max(8, py)}px`;
+  _brandMenu.querySelectorAll(".ctx-item").forEach(b =>
+    b.addEventListener("click", () => {
+      const act = b.dataset.act;
+      const target = _menuPid;
+      hideBrandMenu();
+      if (act === "rename") renameProfile(target);
+      else if (act === "copy") createProfile(true, target);
+      else if (act === "delete") deleteProfile(target);
+    }));
+}
+
+function hideBrandMenu() {
+  _brandMenu.classList.add("hidden");
+  _menuPid = null;
+}
+
+document.getElementById("brand-list").addEventListener("contextmenu", (e) => {
+  const item = e.target.closest(".brand-item");
+  if (!item || !item.dataset.pid) return;
+  e.preventDefault();
+  openBrandMenu(e.clientX, e.clientY, item.dataset.pid);
+});
+document.addEventListener("click", (e) => { if (!_brandMenu.contains(e.target)) hideBrandMenu(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideBrandMenu(); });
+window.addEventListener("blur", hideBrandMenu);
+document.getElementById("brand-list").addEventListener("scroll", hideBrandMenu);
+
+function prefillReportSub1() {
+  const p = activeProfile();
+  const el = document.getElementById("report-sub1");
+  if (p && el) el.value = p.sub1 || "";
+}
+
+// ============================== Report ==============================
 const today = new Date().toISOString().slice(0, 10);
 document.getElementById("report-date").value = today;
 
@@ -144,7 +393,7 @@ document.getElementById("report-form").addEventListener("submit", async (ev) => 
   const result = document.getElementById("report-result");
 
   if (!_activeProfileId) {
-    status.textContent = "❌ Нет активного профиля. Создай его во вкладке «Настройки».";
+    status.textContent = "❌ Не выбран бренд. Выбери его в списке слева.";
     status.className = "status err";
     return;
   }
@@ -284,7 +533,7 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
-// ------ Settings ------
+// ============================== Settings ==============================
 let _cfgState = null;
 
 async function loadConfig() {
@@ -292,7 +541,7 @@ async function loadConfig() {
   if (!_activeProfileId) {
     _cfgState = emptyConfig();
     renderConfig(_cfgState);
-    loadScheduleSettings();
+    renderBrandSchedule(_cfgState.schedule);
     return;
   }
   try {
@@ -303,18 +552,19 @@ async function loadConfig() {
     _cfgState = emptyConfig();
   }
   renderConfig(_cfgState);
-  loadScheduleSettings();
+  renderBrandSchedule(_cfgState.schedule);
+  renderBrandScheduleInfo();
 
   const p = activeProfile();
   document.getElementById("settings-profile-name").textContent = _cfgState.name || (p && p.name) || "—";
-  document.getElementById("profile-sub1").value = _cfgState.sub1 || (p && p.sub1) || "kub";
+  document.getElementById("profile-sub1").value = _cfgState.sub1 || (p && p.sub1) || "";
 }
 
 const DEFAULT_ADS_MANAGER_BASE_URL = "https://kybyshka-dev.ru";
 
 function emptyConfig() {
   return {
-    name: "", sub1: "kub",
+    name: "", sub1: "",
     leadstech: { base_url: "https://api.leads.tech", login: "", password: "", page_size: 500 },
     ads_manager: { base_url: DEFAULT_ADS_MANAGER_BASE_URL, username: "", password: "" },
     yandex: { base_url: "", username: "", password: "" },
@@ -323,6 +573,7 @@ function emptyConfig() {
                     category_ids: [149, 395, 620, 624],
                     scheme_ids: [1006, 2260, 2805, 2809, 612] },
     google_sheets: { enabled: false, spreadsheet_id: "", service_account_json_path: "cfg/service_account.json" },
+    schedule: { enabled: false, time: "09:00" },
   };
 }
 
@@ -349,9 +600,6 @@ function renderConfig(cfg) {
 
   document.getElementById("ec-login").value = cfg.eightconnect?.login ?? "";
   document.getElementById("ec-password").value = cfg.eightconnect?.password ?? "";
-  // Показываем сохранённое значение как есть: пустой список → пустое поле
-  // (подсказка с примером остаётся в placeholder). Иначе пустой scheme_ids
-  // рисовался дефолтами и мог случайно записаться обратно при сохранении.
   const categoryIds = Array.isArray(cfg.eightconnect?.category_ids) ? cfg.eightconnect.category_ids : [];
   document.getElementById("ec-category-ids").value = categoryIds.join(", ");
   const schemeIds = Array.isArray(cfg.eightconnect?.scheme_ids) ? cfg.eightconnect.scheme_ids : [];
@@ -362,29 +610,44 @@ function renderConfig(cfg) {
   renderSheetLink();
 }
 
-// Общее расписание (не зависит от профиля) — из манифеста.
-async function loadScheduleSettings() {
-  try {
-    const r = await fetch("/api/schedule-settings");
-    const s = await r.json();
-    document.getElementById("sched-enabled").checked = !!s.enabled;
-    document.getElementById("sched-time").value = s.time || "09:00";
-  } catch {
-    document.getElementById("sched-time").value = "09:00";
-  }
-  loadScheduleStatus();
+// ---------- Расписание выбранного бренда (в настройках) ----------
+function renderBrandSchedule(schedule) {
+  const s = schedule || { enabled: false, time: "09:00" };
+  document.getElementById("brand-sched-enabled").checked = !!s.enabled;
+  document.getElementById("brand-sched-time").value = s.time || "09:00";
 }
 
-async function saveScheduleSettings() {
-  const status = document.getElementById("sched-save-status");
+function renderBrandScheduleInfo() {
+  const el = document.getElementById("brand-sched-info");
+  const p = activeProfile();
+  if (!el) return;
+  if (!p || !(p.schedule && p.schedule.enabled)) {
+    el.textContent = "Автозапуск выключен.";
+    el.className = "status";
+    return;
+  }
+  let txt = `✅ Активно. Следующий запуск: ${fmtNextRun(p.next_run)} (Samara)`;
+  if (p.last_run) {
+    const lr = p.last_run;
+    txt += lr.ok
+      ? ` · последний: ${lastRunWhen(lr)} → ${lr.saved_to || "ok"}`
+      : ` · последний упал: ${lastRunWhen(lr)} (${lr.error || "см. логи"})`;
+  }
+  el.textContent = txt;
+  el.className = "status ok";
+}
+
+async function saveBrandSchedule() {
+  if (!_activeProfileId) return;
+  const status = document.getElementById("brand-sched-status");
   const payload = {
-    enabled: document.getElementById("sched-enabled").checked,
-    time: document.getElementById("sched-time").value.trim() || "09:00",
+    enabled: document.getElementById("brand-sched-enabled").checked,
+    time: document.getElementById("brand-sched-time").value.trim() || "09:00",
   };
   status.textContent = "Сохраняю…";
   status.className = "status";
   try {
-    const r = await fetch("/api/schedule-settings", {
+    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/schedule`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
@@ -392,61 +655,34 @@ async function saveScheduleSettings() {
     if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
     status.textContent = "✅ Сохранено";
     status.className = "status ok";
-    loadScheduleStatus();
+    await loadProfiles();
+    renderBrandScheduleInfo();
   } catch (e) {
     status.textContent = "❌ " + e.message;
     status.className = "status err";
   }
 }
+document.getElementById("brand-sched-save").addEventListener("click", saveBrandSchedule);
 
-document.getElementById("sched-save").addEventListener("click", saveScheduleSettings);
-
-async function loadScheduleStatus() {
-  const el = document.getElementById("sched-status");
-  try {
-    const r = await fetch("/api/schedule");
-    const s = await r.json();
-    if (!s.enabled) {
-      el.textContent = "Планировщик выключен.";
-      el.className = "status";
-    } else {
-      const next = s.next_run ? s.next_run.replace("T", " ") : "—";
-      let txt = `✅ Активен. Следующий запуск: ${next} (Samara)`;
-      if (s.last_run) {
-        const lr = s.last_run;
-        const when = (lr.finished_at || lr.started_at || "").replace("T", " ");
-        if (Array.isArray(lr.results)) {
-          const okN = lr.results.filter(x => x.ok).length;
-          txt += ` · последний: ${when} → ${okN}/${lr.results.length} профилей ок`;
-        } else if (lr.ok) {
-          txt += ` · последний: ${when} → ${lr.saved_to || "ok"}`;
-        } else {
-          txt += ` · последний упал: ${when} (${lr.error || "см. логи"})`;
-        }
-      }
-      el.textContent = txt;
-      el.className = "status ok";
-    }
-  } catch (e) {
-    el.textContent = "Не удалось получить статус планировщика";
-    el.className = "status err";
-  }
-}
-
-document.getElementById("sched-run-now").addEventListener("click", async () => {
-  const status = document.getElementById("sched-run-status");
-  status.textContent = "Прогоняю все профили…";
+document.getElementById("brand-sched-run").addEventListener("click", async () => {
+  if (!_activeProfileId) return;
+  const status = document.getElementById("brand-sched-status");
+  status.textContent = "Прогоняю за вчера…";
   status.className = "status";
   try {
-    const r = await fetch("/api/schedule/run-now", { method: "POST" });
+    const r = await fetch("/api/schedule/run-now", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: _activeProfileId }),
+    });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
-    const results = data.results || [];
-    const okN = results.filter(x => x.ok).length;
-    const failN = results.length - okN;
-    status.textContent = `✅ Готово (${data.date}): ${okN} ок${failN ? `, ${failN} с ошибкой` : ""}`;
-    status.className = failN ? "status err" : "status ok";
-    loadScheduleStatus();
+    const res = (data.results || [])[0] || {};
+    status.textContent = res.ok
+      ? `✅ ${data.date}: ${res.saved_to || "ok"}${res.google_sheets_error ? ` · Sheets: ${res.google_sheets_error}` : ""}`
+      : `❌ ${res.error || "ошибка"}`;
+    status.className = (res.ok && !res.google_sheets_error) ? "status ok" : "status err";
+    await loadProfiles();
+    renderBrandScheduleInfo();
   } catch (e) {
     status.textContent = "❌ " + e.message;
     status.className = "status err";
@@ -475,14 +711,14 @@ document.getElementById("save-config").addEventListener("click", async () => {
   const status = document.getElementById("save-status");
 
   if (!_activeProfileId) {
-    status.textContent = "❌ Нет активного профиля.";
+    status.textContent = "❌ Не выбран бренд.";
     status.className = "status err";
     return;
   }
 
   const payload = {
     name: (activeProfile()?.name) || _cfgState?.name || "",
-    sub1: document.getElementById("profile-sub1").value.trim() || "kub",
+    sub1: document.getElementById("profile-sub1").value.trim(),
     leadstech: {
       base_url: document.getElementById("lt-base-url").value.trim(),
       login: document.getElementById("lt-login").value.trim(),
@@ -522,6 +758,11 @@ document.getElementById("save-config").addEventListener("click", async () => {
       spreadsheet_id: extractSpreadsheetId(document.getElementById("gs-spreadsheet-id").value),
       service_account_json_path: _cfgState?.google_sheets?.service_account_json_path || "cfg/service_account.json",
     },
+    // расписание включаем в payload, чтобы сохранение настроек его не затёрло
+    schedule: {
+      enabled: document.getElementById("brand-sched-enabled").checked,
+      time: document.getElementById("brand-sched-time").value.trim() || "09:00",
+    },
     analysis: _cfgState?.analysis || { lookback_days: 7 },
   };
 
@@ -539,49 +780,79 @@ document.getElementById("save-config").addEventListener("click", async () => {
     status.textContent = "✅ Сохранено";
     status.className = "status ok";
     _cfgState = payload;
-    await loadProfiles();   // name/sub1 в полосе могли измениться
+    await loadProfiles();   // name/sub1/расписание в списке могли измениться
   } catch (e) {
     status.textContent = "❌ " + e.message;
     status.className = "status err";
   }
 });
 
-// ------ History ------
+// ============================== History ==============================
 async function loadHistory() {
   try {
     const r = await fetch("/api/reports");
     const data = await r.json();
-    const tbody = document.querySelector("#history-table tbody");
-    tbody.innerHTML = "";
-    if (!data.items.length) {
-      tbody.innerHTML = `<tr><td colspan="4" style="color: var(--muted);">Пока пусто. Сгенерируй отчёт во вкладке «Отчёт».</td></tr>`;
-      return;
-    }
-    data.items.forEach(item => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(item.name)}</td>
-        <td>${item.size} B</td>
-        <td>${item.mtime.replace("T", " ")}</td>
-        <td><button class="secondary" data-view="${escapeHtml(item.name)}">Открыть</button></td>
-      `;
-      tr.querySelector("button").addEventListener("click", async (ev) => {
-        const name = ev.target.dataset.view;
-        const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
-        const data = await rr.json();
-        const pre = document.getElementById("history-preview");
-        pre.textContent = JSON.stringify(data, null, 2);
-        pre.classList.remove("hidden");
-        pre.scrollIntoView({ behavior: "smooth" });
-      });
-      tbody.appendChild(tr);
-    });
+    _historyItems = data.items || [];
+    fillHistoryFilter();
+    renderHistory();
   } catch (e) {
     console.error(e);
   }
 }
 
-document.getElementById("history-reload").addEventListener("click", loadHistory);
+let _historyItems = [];
 
-// ------ Bootstrap ------
+function fillHistoryFilter() {
+  const sel = document.getElementById("history-brand-filter");
+  const cur = sel.value;
+  const ids = new Set();
+  _profilesState.forEach(p => ids.add(p.id));
+  // pid вытаскиваем из имени файла "<date>_<sub1>__<pid>.json"
+  _historyItems.forEach(it => {
+    const m = it.name.match(/__([a-z0-9-]+)\.json$/i);
+    if (m) ids.add(m[1]);
+  });
+  const nameById = {};
+  _profilesState.forEach(p => { nameById[p.id] = p.name; });
+  sel.innerHTML = `<option value="">Все бренды</option>` +
+    [...ids].sort().map(id => `<option value="${escapeHtml(id)}">${escapeHtml(nameById[id] || id)}</option>`).join("");
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+
+function renderHistory() {
+  const tbody = document.querySelector("#history-table tbody");
+  tbody.innerHTML = "";
+  const filter = document.getElementById("history-brand-filter").value;
+  const items = filter
+    ? _historyItems.filter(it => it.name.match(new RegExp(`__${filter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.json$`, "i")))
+    : _historyItems;
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="4" style="color: var(--muted);">Пусто. Сгенерируй отчёт во вкладке «Отчёт» или прогони бренд в «Обзоре».</td></tr>`;
+    return;
+  }
+  items.forEach(item => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(item.name)}</td>
+      <td>${item.size} B</td>
+      <td>${item.mtime.replace("T", " ")}</td>
+      <td><button class="secondary" data-view="${escapeHtml(item.name)}">Открыть</button></td>
+    `;
+    tr.querySelector("button").addEventListener("click", async (ev) => {
+      const name = ev.target.dataset.view;
+      const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+      const data = await rr.json();
+      const pre = document.getElementById("history-preview");
+      pre.textContent = JSON.stringify(data, null, 2);
+      pre.classList.remove("hidden");
+      pre.scrollIntoView({ behavior: "smooth" });
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById("history-reload").addEventListener("click", loadHistory);
+document.getElementById("history-brand-filter").addEventListener("change", renderHistory);
+
+// ============================== Bootstrap ==============================
 loadProfiles();

@@ -28,7 +28,7 @@ Healthcheck: `GET /api/health` → `{"ok": true}`.
 `core.build_report(config, day, sub1)` — единственная функция, строящая дневной отчёт. Её дёргают три точки входа:
 - `app.py` (FastAPI, `POST /api/report`) — веб-морда
 - `daily_report.py` — CLI-обёртка
-- `scheduler.ReportScheduler` — автозапуск каждый день в настраиваемое время по Европа/Самара за предыдущий день
+- `scheduler.ReportScheduler` — автозапуск каждого бренда в его собственное время по Европа/Самара за предыдущий день
 
 `build_report` последовательно собирает пять внешних источников и опционально пишет в Google Sheets:
 
@@ -44,11 +44,13 @@ Healthcheck: `GET /api/health` → `{"ok": true}`.
 
 Общая JWT-механика (login, _get с авто-relogin) живёт в `http_base.JWTAuthClient`; `AdsManagerClient` и `YandexAdsManagerClient` — тонкие наследники, добавляющие свой `get_daily_stats` (VK пробрасывает `label`, Yandex — нет). Одна общая функция `core._collect_ads_stats` обходит `accounts[]` и превращает ответ в унифицированный `{cabinets, total, errors}`.
 
-### Конфиг
+### Конфиг и профили (бренды)
 
-Единый JSON — `cfg/lt_vk_config.json`. Редактируется через UI (`POST /api/config`, вкладка «Настройки»); перед записью делается `.bak`. Схема жёстко задана pydantic-моделями в `app.py` (`ConfigPayload`), дефолты для новых полей прописаны там же, так что старые конфиги не ломаются после обновления схемы.
+Каждый бренд — отдельный **профиль**: файл `cfg/profiles/<id>.json` со своим набором всех источников, `sub1`, `google_sheets.spreadsheet_id` и **своим расписанием** `schedule: {enabled, time}`. Глобальный манифест `cfg/profiles.json` хранит порядок профилей, активный (`active_id`) и дефолтное время для новых брендов. Профили редактируются через UI (`POST /api/profiles/{id}/config`); перед записью делается `.bak`. Схема задана pydantic-моделью `ConfigPayload` в `app.py`, дефолты для новых полей там же — старые профили не ломаются после обновления схемы.
 
-`cfg/service_account.json` — Google сервисный аккаунт для Sheets. Путь настраивается в `google_sheets.service_account_json_path`. Если `google_sheets.enabled=false`, запись в Sheets пропускается, но отчёт всё равно собирается и сохраняется в `output/`.
+Новый бренд проще всего завести **копией** существующего (`POST /api/profiles` с `copy_from`, или кнопка «копировать» в UI) и сменой `sub1` / `spreadsheet_id` / кредов. Раскладка таблицы у всех брендов одинаковая (см. sheets_writer), поэтому таблица нового бренда должна быть копией того же шаблона.
+
+`cfg/lt_vk_config.json` — legacy: при первом старте `ensure_profiles_migrated()` мигрирует его в первый профиль, дальше используется только CLI-обёрткой. `cfg/service_account.json` — Google сервисный аккаунт для Sheets, путь в `google_sheets.service_account_json_path`. При `google_sheets.enabled=false` запись в Sheets пропускается, но отчёт всё равно собирается в `output/`.
 
 ### Google Sheets writer — самое специфичное место
 
@@ -64,27 +66,23 @@ Healthcheck: `GET /api/health` → `{"ok": true}`.
 
 ### Output
 
-- `output/<YYYY-MM-DD>_<sub1>.json` — полный JSON-отчёт (пишет и CLI, и веб).
+- `output/<YYYY-MM-DD>_<sub1>__<profile_id>.json` — полный JSON-отчёт (пишет веб/планировщик; `profile_id` в имени, т.к. `sub1` у разных брендов может совпадать). CLI-режим пишет без суффикса профиля.
 - `output/8connect_<YYYY-MM-DD>.json` — сырой ответ 8connect для отладки (пишет `core._save_eightconnect_raw`).
 - Директория в docker-compose примонтирована с хоста, поэтому отчёты переживают пересборку контейнера.
 
-### Планировщик (APScheduler)
+### Планировщик (APScheduler) — расписание на каждый бренд
 
-`scheduler.py` (`ReportScheduler`) — обёртка над `AsyncIOScheduler`, стартует в FastAPI lifespan и читает блок `schedule` из того же `cfg/lt_vk_config.json`:
+`scheduler.py` (`ReportScheduler`) — обёртка над `AsyncIOScheduler`, стартует в FastAPI lifespan. У **каждого** профиля своё расписание `schedule: {enabled, time}` в его файле; планировщик регистрирует **по одному cron-job на бренд** (`report__<pid>`), у каждого своё время. Cron жёстко привязан к `ZoneInfo("Europe/Samara")` (UTC+4). В заданное время — `build_report(config, вчера, sub1)` только этого бренда, результат пишется как ручной `POST /api/report`: в `output/{date}_{sub1}__{pid}.json` и в Sheets. «Вчера» — по Самарской дате (`datetime.now(SAMARA_TZ).date() - 1 day`), независимо от TZ контейнера.
 
-```json
-"schedule": {"enabled": true, "time": "09:00", "sub1": "kub"}
-```
+`_profiles_provider()` отдаёт `(pid, config, sub1, schedule)` по всем профилям; `_effective_schedule` подставляет время из манифеста для ещё не мигрированных профилей. `reload()` пересобирает набор job'ов (добавляет включённые, снимает выключенные/удалённые). При сохранении конфига/расписания (`POST /api/profiles/{id}/config` или `.../schedule`) дёргается `scheduler.reload()`; плюс watcher раз в 10с авто-перечитывает расписания — ребилд/рестарт не нужен. Статус — `GET /api/schedule`: сводка (`enabled`, ближайший `next_run`) + `profiles[pid] = {enabled, next_run, last_run}`. Ручной прогон — `POST /api/schedule/run-now {profile_id?}` (без тела — все бренды), трейс `trigger: "manual"`.
 
-Cron-trigger жёстко привязан к `ZoneInfo("Europe/Samara")` (UTC+4). В заданное время — `build_report(config, вчера, sub1)`, результат пишется так же, как ручной `POST /api/report`: в `output/{date}_{sub1}.json` и в Sheets. «Вчера» вычисляется по Самарской дате (`datetime.now(SAMARA_TZ).date() - 1 day`), независимо от TZ контейнера.
-
-При каждом `POST /api/config` scheduler перечитывает конфиг и перерегистрирует job — ребилд/рестарт не требуется. Статус — `GET /api/schedule` (`enabled`, `next_run` с TZ-offset, `last_run` с датой/sub1/ok/error). Ручной тест — `POST /api/schedule/run-now {"sub1": "..."}` — та же функция, что запускает cron, с трейсом `trigger: "manual"`.
+Миграция: `ensure_profile_schedules_seeded()` при старте засевает `schedule` в профили, у которых его нет, из общего времени манифеста (одноразово, идемпотентно; ошибка записи логируется warning'ом и **не валит старт** — расписание тогда берётся из манифеста на лету).
 
 Зависимости в requirements: `APScheduler==3.10.4`, `tzdata==2024.2` (для ZoneInfo в docker-слим).
 
 ### Фронт
 
-`static/index.html` + `app.js` + `app.css` — две вкладки (Отчёт / Настройки), ходят только в `/api/*`. Монтируется в FastAPI через `StaticFiles` **после** регистрации API-роутов (иначе SPA-маунт перекроет их).
+`static/index.html` + `app.js` + `app.css` — раскладка «**сайдбар брендов + рабочая область**», ходит только в `/api/*`. Слева список брендов с поиском, бейджем расписания (`⏰ HH:MM` / «выкл») и индикатором последнего запуска; снизу — кнопки создать/копировать/переименовать/удалить, плюс те же действия по **ПКМ на бренде** (контекстное меню адресуется конкретному бренду, не активному). Справа 4 вкладки: **Обзор** (дашборд всех брендов: тумблер расписания + время правятся прямо в таблице → `POST /api/profiles/{id}/schedule`, колонки next_run / последний запуск / «прогнать за вчера»), **Отчёт**, **Настройки** (скоупятся на выбранный бренд, включая карточку его расписания), **История** (с фильтром по бренду). Статика монтируется в FastAPI через `StaticFiles` **после** API-роутов (иначе SPA-маунт перекроет их).
 
 ## Конвенции
 

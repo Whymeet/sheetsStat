@@ -1,25 +1,28 @@
 """Мини-веб-морда для sheetsStat.
 
-Профили: несколько независимых наборов настроек (под разные Google-таблицы),
-переключаемых глобальными вкладками. Каждый профиль — отдельный файл
-cfg/profiles/<id>.json (все источники + name + sub1). Глобальный манифест
-cfg/profiles.json хранит порядок, активный профиль и общее расписание.
+Профили (бренды): несколько независимых наборов настроек под разные
+Google-таблицы. Каждый профиль — отдельный файл cfg/profiles/<id>.json
+(все источники + name + sub1 + своё расписание `schedule`). Глобальный
+манифест cfg/profiles.json хранит порядок, активный профиль и дефолтное
+время для новых брендов.
 
 API:
-    GET    /api/profiles               — список профилей + активный + расписание
-    POST   /api/profiles               — создать профиль (пустой или копией)
-    PUT    /api/profiles/{id}           — переименовать
-    DELETE /api/profiles/{id}           — удалить (нельзя последний)
-    POST   /api/profiles/{id}/activate  — сделать активным
-    GET    /api/profiles/{id}/config    — конфиг профиля (секреты маскируются)
-    POST   /api/profiles/{id}/config    — сохранить конфиг профиля
-    GET    /api/schedule-settings       — общее расписание {enabled, time}
-    POST   /api/schedule-settings       — сохранить общее расписание
-    POST   /api/report                  — отчёт {profile_id, date, sub1?}
-    GET    /api/reports                 — список сохранённых отчётов
-    GET    /api/reports/{name}          — содержимое конкретного отчёта
-    GET    /api/schedule                — статус планировщика (next_run, last_run)
-    POST   /api/schedule/run-now        — ручной прогон всех профилей за вчера
+    GET    /api/profiles                — список брендов + активный + статусы
+    POST   /api/profiles                — создать бренд (пустой или копией)
+    PUT    /api/profiles/{id}            — переименовать
+    DELETE /api/profiles/{id}            — удалить (нельзя последний)
+    POST   /api/profiles/{id}/activate   — сделать активным
+    GET    /api/profiles/{id}/config     — конфиг бренда (секреты маскируются)
+    POST   /api/profiles/{id}/config     — сохранить конфиг бренда
+    GET    /api/profiles/{id}/schedule   — расписание бренда {enabled, time}
+    POST   /api/profiles/{id}/schedule   — сохранить расписание бренда
+    GET    /api/schedule-settings        — legacy: дефолт времени для новых брендов
+    POST   /api/schedule-settings        — legacy: сохранить дефолт времени
+    POST   /api/report                   — отчёт {profile_id, date, sub1?}
+    GET    /api/reports                  — список сохранённых отчётов
+    GET    /api/reports/{name}           — содержимое конкретного отчёта
+    GET    /api/schedule                 — статус планировщика (per-brand)
+    POST   /api/schedule/run-now         — ручной прогон {profile_id?} (без — все)
 
 Статика отдаётся из папки static/.
 """
@@ -189,7 +192,7 @@ def list_profile_ids() -> List[str]:
     return order
 
 
-def _empty_profile_body(name: str, sub1: str = "kub") -> Dict[str, Any]:
+def _empty_profile_body(name: str, sub1: str = "") -> Dict[str, Any]:
     return {
         "name": name,
         "sub1": sub1,
@@ -205,6 +208,7 @@ def _empty_profile_body(name: str, sub1: str = "kub") -> Dict[str, Any]:
                          "category_ids": [], "scheme_ids": [1006, 2260, 2805, 2809, 612]},
         "google_sheets": {"enabled": False, "spreadsheet_id": "",
                           "service_account_json_path": "cfg/service_account.json"},
+        "schedule": {"enabled": False, "time": "09:00"},
         "analysis": {"lookback_days": 7},
     }
 
@@ -225,26 +229,61 @@ def ensure_profiles_migrated() -> None:
     if old:
         sched = old.get("schedule") or {}
         sub1 = (sched.get("sub1") or "kub").strip() or "kub"
+        sched_block = {"enabled": bool(sched.get("enabled", False)),
+                       "time": (sched.get("time") or "09:00")}
         name = "Основной"
         pid = _gen_id(name, set())
         body = {k: v for k, v in old.items() if k != "schedule"}
         body["name"] = name
         body["sub1"] = sub1
+        body["schedule"] = dict(sched_block)
         write_profile(pid, body)
         write_manifest({
             "version": 1, "active_id": pid, "order": [pid],
-            "schedule": {"enabled": bool(sched.get("enabled", False)),
-                         "time": (sched.get("time") or "09:00")},
+            "schedule": sched_block,  # дефолт времени для новых брендов
         })
         logger.info("Профили: мигрировал lt_vk_config.json → профиль %r", pid)
     else:
         pid = _gen_id("Основной", set())
-        write_profile(pid, _empty_profile_body("Основной", "kub"))
+        write_profile(pid, _empty_profile_body("Основной"))
         write_manifest({
             "version": 1, "active_id": pid, "order": [pid],
             "schedule": {"enabled": False, "time": "09:00"},
         })
         logger.info("Профили: создан дефолтный профиль %r", pid)
+
+
+def _effective_schedule(cfg: Dict[str, Any], default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Расписание бренда. Если в профиле его нет (не мигрирован) — берём дефолт
+    из манифеста, чтобы старое общее время не потерялось до записи seed'а."""
+    sched = cfg.get("schedule")
+    if isinstance(sched, dict):
+        return {"enabled": bool(sched.get("enabled", False)), "time": sched.get("time") or "09:00"}
+    md = default if default is not None else (read_manifest().get("schedule") or {})
+    return {"enabled": bool(md.get("enabled", False)), "time": md.get("time") or "09:00"}
+
+
+def ensure_profile_schedules_seeded() -> None:
+    """Идемпотентно: у профилей без блока `schedule` засевает его из манифеста.
+
+    Нужно для профилей, созданных до перехода на расписание-на-бренд (когда
+    время было общим в манифесте). Запускается один раз при старте. Ошибка
+    записи (например, нет прав на файл) не валит старт — расписание всё равно
+    подхватится из манифеста через _effective_schedule.
+    """
+    manifest_sched = read_manifest().get("schedule") or {"enabled": False, "time": "09:00"}
+    for pid in list_profile_ids():
+        cfg = _read_profile_safe(pid)
+        if cfg is None or isinstance(cfg.get("schedule"), dict):
+            continue
+        cfg["schedule"] = {"enabled": bool(manifest_sched.get("enabled", False)),
+                           "time": manifest_sched.get("time") or "09:00"}
+        try:
+            write_profile(pid, cfg)
+            logger.info("Профиль %r: засеял schedule из манифеста (%s)", pid, cfg["schedule"])
+        except OSError as e:
+            logger.warning("Профиль %r: не смог записать seed расписания (%s) — "
+                           "расписание берётся из манифеста на лету", pid, e)
 
 
 def _mask_secrets(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -322,8 +361,8 @@ class GoogleSheetsSettings(BaseModel):
         return _extract_spreadsheet_id(v or "")
 
 
-class ScheduleGlobal(BaseModel):
-    """Общее расписание для всех профилей (Samara-time, за прошлый день)."""
+class ProfileSchedule(BaseModel):
+    """Расписание одного бренда (Samara-time, за прошлый день)."""
 
     enabled: bool = False
     time: str = "09:00"  # HH:MM, Europe/Samara
@@ -337,17 +376,22 @@ class ScheduleGlobal(BaseModel):
         return v
 
 
+# Алиас для обратной совместимости: общий «дефолт времени для новых брендов».
+ScheduleGlobal = ProfileSchedule
+
+
 class ConfigPayload(BaseModel):
-    """Конфиг одного профиля. Расписание — общее, живёт в манифесте."""
+    """Конфиг одного профиля (бренда). Расписание — своё, живёт в файле профиля."""
 
     name: Optional[str] = None
-    sub1: str = "kub"
+    sub1: str = ""
     leadstech: LeadsTechSettings
     ads_manager: AdsManagerSettings = Field(default_factory=AdsManagerSettings)
     yandex: YandexSettings = Field(default_factory=YandexSettings)
     yandex_metrika: YandexMetrikaSettings = Field(default_factory=YandexMetrikaSettings)
     eightconnect: EightConnectSettings = Field(default_factory=EightConnectSettings)
     google_sheets: GoogleSheetsSettings = Field(default_factory=GoogleSheetsSettings)
+    schedule: ProfileSchedule = Field(default_factory=ProfileSchedule)
     analysis: Dict[str, Any] = Field(default_factory=lambda: {"lookback_days": 7})
 
 
@@ -366,27 +410,28 @@ class ReportRequest(BaseModel):
     sub1: Optional[str] = None  # None → берём sub1 профиля
 
 
+class RunNowRequest(BaseModel):
+    profile_id: Optional[str] = None  # None → прогнать все бренды
+
+
 # ---------- App ----------
 
 
-def _schedule_provider() -> Dict[str, Any]:
-    return read_manifest().get("schedule") or {}
-
-
 def _profiles_provider() -> List[tuple]:
-    """[(profile_id, config, sub1), ...] для планировщика."""
+    """[(profile_id, config, sub1, schedule), ...] для планировщика."""
     out: List[tuple] = []
+    md = read_manifest().get("schedule") or {}
     for pid in list_profile_ids():
         cfg = _read_profile_safe(pid)
         if cfg is None:
             continue
-        sub1 = (cfg.get("sub1") or "kub").strip() or "kub"
-        out.append((pid, cfg, sub1))
+        sub1 = (cfg.get("sub1") or "").strip()
+        schedule = _effective_schedule(cfg, md)
+        out.append((pid, cfg, sub1, schedule))
     return out
 
 
 scheduler: ReportScheduler = ReportScheduler(
-    schedule_provider=_schedule_provider,
     profiles_provider=_profiles_provider,
     output_dir=OUTPUT_DIR,
 )
@@ -395,6 +440,7 @@ scheduler: ReportScheduler = ReportScheduler(
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     ensure_profiles_migrated()
+    ensure_profile_schedules_seeded()
     scheduler.start()
     try:
         yield
@@ -419,18 +465,24 @@ def list_profiles():
     active = m.get("active_id")
     if active not in ids:
         active = ids[0] if ids else None
+    sched_status = scheduler.status().get("profiles", {})
     profiles = []
     for pid in ids:
         cfg = _read_profile_safe(pid) or {}
+        st = sched_status.get(pid) or {}
         profiles.append({
             "id": pid,
             "name": cfg.get("name") or pid,
-            "sub1": cfg.get("sub1") or "kub",
+            "sub1": cfg.get("sub1") or "",
             "is_active": pid == active,
+            "schedule": _effective_schedule(cfg, m.get("schedule") or {}),
+            "sheets_enabled": bool((cfg.get("google_sheets") or {}).get("enabled")),
+            "next_run": st.get("next_run"),
+            "last_run": st.get("last_run"),
         })
     return {
         "active_id": active,
-        "schedule": m.get("schedule") or {"enabled": False, "time": "09:00"},
+        "default_schedule": m.get("schedule") or {"enabled": False, "time": "09:00"},
         "profiles": profiles,
     }
 
@@ -446,9 +498,10 @@ def create_profile(body: ProfileCreate):
         src = read_profile(body.copy_from)  # 404 если нет
         data = json.loads(json.dumps(src))  # глубокая копия (с реальными секретами)
         data["name"] = name
-        data.setdefault("sub1", "kub")
+        data.setdefault("sub1", "")
+        data.setdefault("schedule", {"enabled": False, "time": "09:00"})
     else:
-        data = _empty_profile_body(name, "kub")
+        data = _empty_profile_body(name)
 
     write_profile(pid, data)
     order = [x for x in m.get("order", []) if x != pid]
@@ -538,8 +591,25 @@ def save_profile_config(pid: str, payload: ConfigPayload):
     return {"ok": True}
 
 
-# ---------- Schedule (общее для всех профилей) ----------
+# ---------- Schedule (своё у каждого бренда) ----------
 
+@app.get("/api/profiles/{pid}/schedule")
+def get_profile_schedule(pid: str):
+    cfg = read_profile(pid)  # 404 если нет
+    return _effective_schedule(cfg)
+
+
+@app.post("/api/profiles/{pid}/schedule")
+def save_profile_schedule(pid: str, s: ProfileSchedule):
+    cfg = read_profile(pid)  # 404 если нет
+    cfg["schedule"] = {"enabled": s.enabled, "time": s.time}
+    write_profile(pid, cfg)
+    scheduler.reload()
+    logger.info("Профиль %r: расписание enabled=%s time=%s", pid, s.enabled, s.time)
+    return {"ok": True, "schedule": cfg["schedule"]}
+
+
+# Legacy: дефолтное время для новых брендов (в манифесте). UI больше им не управляет.
 @app.get("/api/schedule-settings")
 def get_schedule_settings():
     return read_manifest().get("schedule") or {"enabled": False, "time": "09:00"}
@@ -550,8 +620,7 @@ def save_schedule_settings(s: ScheduleGlobal):
     m = read_manifest()
     m["schedule"] = {"enabled": s.enabled, "time": s.time}
     write_manifest(m)
-    scheduler.reload()
-    logger.info("Расписание сохранено: enabled=%s time=%s", s.enabled, s.time)
+    logger.info("Дефолт расписания сохранён: enabled=%s time=%s", s.enabled, s.time)
     return {"ok": True}
 
 
@@ -561,8 +630,9 @@ def get_schedule():
 
 
 @app.post("/api/schedule/run-now")
-async def schedule_run_now():
-    return await scheduler.trigger_now()
+async def schedule_run_now(req: Optional[RunNowRequest] = None):
+    pid = (req.profile_id if req else None) or None
+    return await scheduler.trigger_now(pid)
 
 
 @app.post("/api/report")
@@ -573,7 +643,7 @@ def run_report(req: ReportRequest):
         raise HTTPException(status_code=400, detail="date должен быть в формате YYYY-MM-DD")
 
     config = read_profile(req.profile_id)  # 404 если профиля нет
-    sub1 = (req.sub1 or "").strip() or (config.get("sub1") or "kub")
+    sub1 = (req.sub1 or "").strip() or (config.get("sub1") or "").strip()
 
     try:
         report = build_report(config, day, sub1)
