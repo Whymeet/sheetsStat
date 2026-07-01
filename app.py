@@ -340,6 +340,15 @@ class YandexMetrikaSettings(BaseModel):
     counter_id: int = 0
     goals: List[str] = Field(default_factory=lambda: ["Zayvka"])
     attribution: str = "LASTSIGN"
+    # Какое число цели пишем в столбец G «Заявки»:
+    #   "visits"  — Целевые визиты (по умолчанию, как было),
+    #   "reaches" — Достижения.
+    zayavki_metric: str = "visits"
+
+    @field_validator("zayavki_metric", mode="before")
+    @classmethod
+    def _normalize_zayavki_metric(cls, v: Any) -> str:
+        return v if v in ("reaches", "visits") else "visits"
 
 
 class EightConnectSettings(BaseModel):

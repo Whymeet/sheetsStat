@@ -11,10 +11,16 @@ VK Ads Manager (`ads_manager_client.py`) и Yandex Ads Manager
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Type
 
 import requests
+
+# Транзиентные сетевые сбои, на которых имеет смысл повторить запрос
+# (в отличие от 4xx/5xx — там ретрай не поможет). Сюда попадают
+# ReadTimeout/ConnectTimeout и обрывы соединения.
+RETRYABLE_EXC = (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
 
 
 @dataclass
@@ -38,6 +44,10 @@ class JWTAuthClient:
     LOGGER_NAME: str = "sheetsstat.jwt_client"
     AUTH_EXC_CLS: Type[RuntimeError] = JWTAuthError
     DEFAULT_TIMEOUT: int = 60
+    # Сколько раз повторить запрос после транзиентного таймаута/обрыва
+    # (0 = без повторов). Пауза между попытками — RETRY_BACKOFF секунд.
+    MAX_RETRIES: int = 1
+    RETRY_BACKOFF: float = 1.5
 
     def __init__(self, cfg: JWTClientConfig, timeout: Optional[int] = None):
         self.cfg = cfg
@@ -73,19 +83,31 @@ class JWTAuthClient:
         return {"Authorization": f"Bearer {self._ensure_token()}"}
 
     def _get(self, path: str, params: Dict[str, Any]) -> requests.Response:
-        resp = requests.get(
-            self._api(path),
-            headers=self._auth_headers(),
-            params=params,
-            timeout=self.timeout,
-        )
-        if resp.status_code == 401:
-            self._logger.info("401 → повторный логин")
-            self._token = None
-            resp = requests.get(
-                self._api(path),
-                headers=self._auth_headers(),
-                params=params,
-                timeout=self.timeout,
-            )
-        return resp
+        url = self._api(path)
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                resp = requests.get(
+                    url,
+                    headers=self._auth_headers(),
+                    params=params,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 401:
+                    self._logger.info("401 → повторный логин")
+                    self._token = None
+                    resp = requests.get(
+                        url,
+                        headers=self._auth_headers(),
+                        params=params,
+                        timeout=self.timeout,
+                    )
+                return resp
+            except RETRYABLE_EXC as e:
+                if attempt >= self.MAX_RETRIES:
+                    raise
+                wait = self.RETRY_BACKOFF * (attempt + 1)
+                self._logger.warning(
+                    "GET %s: %s — попытка %d/%d, повтор через %.1fs",
+                    url, e, attempt + 1, self.MAX_RETRIES, wait,
+                )
+                time.sleep(wait)

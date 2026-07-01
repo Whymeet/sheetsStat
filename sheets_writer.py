@@ -7,7 +7,8 @@
     C  — Приход            = формула `=AE{row}+AJ{row}+AF{row}+R{row}`
     E  — Клики ЛТ          = leadstech.clicks
     F  — Метрика визиты    = yandex_metrika.visits
-    G  — Заявки с сайта    = visits у цели Zayvka
+    G  — Заявки с сайта    = Достижения/Целевые визиты цели бренда
+                             (yandex_metrika.zayavki_metric: reaches|visits)
     AB — 8connect SMS      = eightconnect.count (кол-во отправленных SMS)
     AC — 8connect cost     = eightconnect.cost
     AE — 8connect charge   = eightconnect.charge
@@ -149,15 +150,30 @@ def _find_header_column(headers: Dict[str, str], report_name: str) -> Optional[s
     return None
 
 
-def _find_goal_visits(yandex_metrika: Dict[str, Any], goal_name: str) -> int:
+def _goal_num(g: Dict[str, Any], metric: str) -> int:
+    try:
+        return int(g.get(metric) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _find_goal_value(yandex_metrika: Dict[str, Any], goal_name: str, metric: str) -> int:
+    """Число цели для столбца G.
+
+    `metric` — какое число цели брать: "visits" (Целевые визиты) или
+    "reaches" (Достижения); выбирается в настройках бренда.
+
+    Цель для G у каждого бренда своя (напр. "Zayvka" или "Заявка с сайта"),
+    поэтому не привязываемся жёстко к одному имени: сначала пробуем матч по
+    `goal_name`, а если такой цели нет — берём первую настроенную цель бренда
+    (у профиля обычно ровно одна цель — она и есть «Заявки с сайта»).
+    """
+    goals = (yandex_metrika or {}).get("goals", []) or []
     target = _norm(goal_name)
-    for g in (yandex_metrika or {}).get("goals", []) or []:
+    for g in goals:
         if _norm(g.get("goal_name", "")) == target:
-            try:
-                return int(g.get("visits") or 0)
-            except (TypeError, ValueError):
-                return 0
-    return 0
+            return _goal_num(g, metric)
+    return _goal_num(goals[0], metric) if goals else 0
 
 
 def _pick_worksheet(spreadsheet: Any, day: date) -> Tuple[Optional[Any], str]:
@@ -396,13 +412,16 @@ def write_daily_report(
     leadstech = report.get("leadstech") or {}
     ym = report.get("yandex_metrika") or {}
     ec = report.get("eightconnect") or {}
-    zayavki_visits = _find_goal_visits(ym, TARGET_GOAL_FOR_ZAYAVKI)
+    zayavki_metric = ((config.get("yandex_metrika") or {}).get("zayavki_metric")) or "visits"
+    if zayavki_metric not in ("reaches", "visits"):
+        zayavki_metric = "visits"
+    zayavki_val = _find_goal_value(ym, TARGET_GOAL_FOR_ZAYAVKI, zayavki_metric)
 
     fixed = {
         "prihod":               float(leadstech.get("sum") or 0),
         "clicks_lt":            int(leadstech.get("clicks") or 0),
         "metrika_v":            int(ym.get("visits") or 0),
-        "zayavki":              int(zayavki_visits or 0),
+        "zayavki":              int(zayavki_val or 0),
         "perehody":             int(leadstech.get("hosts") or 0),
         "eightconnect_cost":    round(float(ec.get("cost") or 0), 2),
         "eightconnect_charge":  round(float(ec.get("charge") or 0), 2),

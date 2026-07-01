@@ -498,7 +498,12 @@ document.getElementById("report-range-form").addEventListener("submit", async (e
         const gsErr = data.google_sheets && data.google_sheets.error;
         if (gsErr) throw new Error(`Sheets: ${gsErr}`);
         lastData = data;
-        appendRangeLine(rangeLog, `✅ ${date}`, "ok");
+        const warns = reportSourceErrors(data);
+        if (warns.length) {
+          appendRangeLine(rangeLog, `⚠️ ${date}: ${warns.join(" | ")}`, "warn");
+        } else {
+          appendRangeLine(rangeLog, `✅ ${date}`, "ok");
+        }
       } catch (e) {
         appendRangeLine(rangeLog, `❌ ${date}: ${e.message}`, "err");
         rangeStatus.textContent = `❌ Остановлено на ${date} (${i + 1} из ${dates.length})`;
@@ -517,6 +522,21 @@ document.getElementById("report-range-form").addEventListener("submit", async (e
 
   if (lastData) renderReport(lastData);
 });
+
+// Собирает ошибки по источникам из отчёта дня (каждая секция кладёт errors[]).
+// Пустой массив = день полный. Непустой = день записан, но часть данных не собрана.
+function reportSourceErrors(data) {
+  const sections = ["ads_manager", "yandex", "yandex_metrika", "leadstech", "eightconnect"];
+  const msgs = [];
+  for (const s of sections) {
+    const errs = data[s] && data[s].errors;
+    if (Array.isArray(errs) && errs.length) {
+      const txt = errs.map((e) => e.error || JSON.stringify(e)).join("; ");
+      msgs.push(`${s}: ${txt}`);
+    }
+  }
+  return msgs;
+}
 
 function appendRangeLine(container, text, cls) {
   const line = document.createElement("div");
@@ -704,6 +724,7 @@ function renderConfig(cfg) {
                  : (cfg.yandex_metrika?.goal_name ? [cfg.yandex_metrika.goal_name] : ["Zayvka"]);
   document.getElementById("ym-goals").value = goalsArr.join(", ");
   document.getElementById("ym-attribution").value = cfg.yandex_metrika?.attribution ?? "LASTSIGN";
+  document.getElementById("ym-zayavki-metric").value = cfg.yandex_metrika?.zayavki_metric ?? "visits";
 
   document.getElementById("ec-login").value = cfg.eightconnect?.login ?? "";
   document.getElementById("ec-password").value = cfg.eightconnect?.password ?? "";
@@ -848,6 +869,7 @@ document.getElementById("save-config").addEventListener("click", async () => {
       goals: document.getElementById("ym-goals").value
               .split(",").map(s => s.trim()).filter(Boolean),
       attribution: document.getElementById("ym-attribution").value.trim() || "LASTSIGN",
+      zayavki_metric: document.getElementById("ym-zayavki-metric").value || "visits",
     },
     eightconnect: {
       base_url: _cfgState?.eightconnect?.base_url || "https://8connect.ru",
