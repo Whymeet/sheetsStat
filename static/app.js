@@ -377,13 +377,29 @@ document.getElementById("brand-list").addEventListener("scroll", hideBrandMenu);
 
 function prefillReportSub1() {
   const p = activeProfile();
+  const sub1 = p ? (p.sub1 || "") : "";
   const el = document.getElementById("report-sub1");
-  if (p && el) el.value = p.sub1 || "";
+  if (el) el.value = sub1;
+  const elRange = document.getElementById("report-range-sub1");
+  if (elRange) elRange.value = sub1;
 }
 
 // ============================== Report ==============================
 const today = new Date().toISOString().slice(0, 10);
 document.getElementById("report-date").value = today;
+document.getElementById("report-start").value = today;
+document.getElementById("report-end").value = today;
+
+// Переключатель режимов «За день» / «За период»
+document.querySelectorAll("#report-mode-tabs .mode-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const mode = tab.dataset.mode;
+    document.querySelectorAll("#report-mode-tabs .mode-tab").forEach((t) =>
+      t.classList.toggle("active", t === tab));
+    document.querySelectorAll("[data-mode-form]").forEach((f) =>
+      f.classList.toggle("hidden", f.dataset.modeForm !== mode));
+  });
+});
 
 document.getElementById("report-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -418,6 +434,97 @@ document.getElementById("report-form").addEventListener("submit", async (ev) => 
     status.className = "status err";
   }
 });
+
+// Перечисляет даты ISO YYYY-MM-DD от startIso до endIso включительно.
+function enumerateDates(startIso, endIso) {
+  const out = [];
+  const end = new Date(endIso + "T00:00:00");
+  for (let d = new Date(startIso + "T00:00:00"); d <= end; d.setDate(d.getDate() + 1)) {
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+document.getElementById("report-range-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const start = document.getElementById("report-start").value;
+  const end = document.getElementById("report-end").value;
+  const sub1 = document.getElementById("report-range-sub1").value.trim();
+  const btn = document.getElementById("report-range-submit");
+  const status = document.getElementById("report-status");
+  const progress = document.getElementById("range-progress");
+  const rangeStatus = document.getElementById("range-status");
+  const rangeLog = document.getElementById("range-log");
+  const result = document.getElementById("report-result");
+
+  if (!_activeProfileId) {
+    status.textContent = "❌ Не выбран бренд. Выбери его в списке слева.";
+    status.className = "status err";
+    return;
+  }
+  if (!start || !end || start > end) {
+    status.textContent = "❌ Начало периода должно быть не позже конца.";
+    status.className = "status err";
+    return;
+  }
+
+  const dates = enumerateDates(start, end);
+  if (dates.length > 92 && !confirm(`Период ${dates.length} дней — это может занять несколько минут и много запросов. Продолжить?`)) {
+    return;
+  }
+
+  status.textContent = "";
+  status.className = "status";
+  result.classList.add("hidden");
+  progress.classList.remove("hidden");
+  rangeLog.innerHTML = "";
+  btn.disabled = true;
+
+  let lastData = null;
+  let stopped = false;
+  try {
+    for (let i = 0; i < dates.length; i++) {
+      const date = dates[i];
+      rangeStatus.textContent = `День ${i + 1} из ${dates.length}: ${date}…`;
+      rangeStatus.className = "status";
+      try {
+        const r = await fetch("/api/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profile_id: _activeProfileId, date, sub1 }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || r.statusText);
+        const gsErr = data.google_sheets && data.google_sheets.error;
+        if (gsErr) throw new Error(`Sheets: ${gsErr}`);
+        lastData = data;
+        appendRangeLine(rangeLog, `✅ ${date}`, "ok");
+      } catch (e) {
+        appendRangeLine(rangeLog, `❌ ${date}: ${e.message}`, "err");
+        rangeStatus.textContent = `❌ Остановлено на ${date} (${i + 1} из ${dates.length})`;
+        rangeStatus.className = "status err";
+        stopped = true;
+        break;
+      }
+    }
+    if (!stopped) {
+      rangeStatus.textContent = `✅ Готово: ${dates.length} дн.`;
+      rangeStatus.className = "status ok";
+    }
+  } finally {
+    btn.disabled = false;
+  }
+
+  if (lastData) renderReport(lastData);
+});
+
+function appendRangeLine(container, text, cls) {
+  const line = document.createElement("div");
+  line.className = "range-line " + (cls || "");
+  line.textContent = text;
+  container.appendChild(line);
+  container.scrollTop = container.scrollHeight;
+}
 
 function renderReport(data) {
   const result = document.getElementById("report-result");

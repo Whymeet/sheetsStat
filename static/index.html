@@ -75,8 +75,13 @@
       <!-- TAB: REPORT -->
       <section id="tab-report" class="tab">
         <div class="card">
-          <h2>Сгенерировать отчёт за день</h2>
-          <form id="report-form" class="grid">
+          <h2>Сгенерировать отчёт</h2>
+          <div class="mode-tabs" id="report-mode-tabs">
+            <button type="button" class="mode-tab active" data-mode="day">За день</button>
+            <button type="button" class="mode-tab" data-mode="range">За период</button>
+          </div>
+
+          <form id="report-form" class="grid" data-mode-form="day">
             <label>Дата
               <input type="date" id="report-date" required>
             </label>
@@ -85,7 +90,26 @@
             </label>
             <button type="submit" class="primary">Сгенерировать</button>
           </form>
+
+          <form id="report-range-form" class="grid hidden" data-mode-form="range">
+            <label>Начало
+              <input type="date" id="report-start" required>
+            </label>
+            <label>Конец
+              <input type="date" id="report-end" required>
+            </label>
+            <label>sub1 / leadstechLabel
+              <input type="text" id="report-range-sub1" placeholder="kub" required>
+            </label>
+            <button type="submit" class="primary" id="report-range-submit">Сгенерировать за период</button>
+          </form>
+
           <p id="report-status" class="status"></p>
+
+          <div id="range-progress" class="hidden">
+            <p id="range-status" class="status"></p>
+            <div id="range-log" class="range-log"></div>
+          </div>
         </div>
 
         <div id="report-result" class="card hidden">

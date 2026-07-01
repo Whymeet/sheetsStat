@@ -334,6 +334,31 @@ table input { width: 100%; padding: 4px 8px; font-size: 13px; }
 .status.ok { color: var(--ok); }
 .status.err { color: var(--danger); }
 
+.mode-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.mode-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s;
+}
+.mode-tab:hover { color: var(--text); background: var(--panel-2); }
+.mode-tab.active { color: var(--accent); background: var(--panel-2); border-color: var(--border); }
+
+.range-log {
+  margin: 8px 0 0 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.range-line.ok { color: var(--ok); }
+.range-line.err { color: var(--danger); }
+
 pre {
   background: var(--panel-2);
   border: 1px solid var(--border);
