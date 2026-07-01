@@ -438,8 +438,10 @@ document.getElementById("report-form").addEventListener("submit", async (ev) => 
 // Перечисляет даты ISO YYYY-MM-DD от startIso до endIso включительно.
 function enumerateDates(startIso, endIso) {
   const out = [];
-  const end = new Date(endIso + "T00:00:00");
-  for (let d = new Date(startIso + "T00:00:00"); d <= end; d.setDate(d.getDate() + 1)) {
+  // Считаем в UTC (суффикс Z + setUTCDate), иначе toISOString() переведёт
+  // местную полночь в UTC и сдвинет дату на сутки назад в зонах восточнее UTC.
+  const end = new Date(endIso + "T00:00:00Z");
+  for (let d = new Date(startIso + "T00:00:00Z"); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
     out.push(d.toISOString().slice(0, 10));
   }
   return out;
