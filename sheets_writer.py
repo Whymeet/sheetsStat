@@ -16,9 +16,13 @@
     AI — Переходы уники    = leadstech.hosts
     AJ — Доход с витрины   = формула `={leadstech.sum}-AE{row}` (sumwebmaster − 8connect charge)
 
-В `AR2:CL2` лежат названия рекламных кабинетов. По каждому spent'у из отчёта
-ищем свою колонку и пишем spent в `{col}{date_row}`. Кабинеты, которых нет
+В строке 2 (`AR2:EZ2`) лежат названия рекламных кабинетов. По каждому spent'у из
+отчёта ищем свою колонку и пишем spent в `{col}{date_row}`. Кабинеты, которых нет
 в шапке, добавляем стопкой начиная с A37 (A=имя, B=spent) — «чтобы не пропали».
+
+    D  — Затраты           = формула Σ(расход_i * коэф_i) + AC (8connect).
+Коэффициент кабинета берётся динамически из строки 1 (`AR1:EZ1`) над его именем:
+число → множитель, пусто/символ → 1 (см. `_parse_coeff` / `_build_zatraty_formula`).
 """
 from __future__ import annotations
 
@@ -55,23 +59,17 @@ COL_8CONN_CHARGE  = "AE"
 COL_8CONN_COUNT   = "AB"
 COL_8CONN_CLIENTS = "AF"
 
-# Коэффициенты (НДС/комиссии) по колонкам кабинетов для формулы «Затраты».
-# Колонки без коэффициента (AC, AX, BC) — суммируются как есть (множитель 1).
-ZATRATY_COEFFS: Dict[str, float] = {
-    "AR": 0.954, "AS": 1.16,  "AT": 1.16,  "AU": 0.99,  "AV": 1.048,
-    "AW": 0.99,               "AY": 1.048, "AZ": 1.16,  "BA": 0.972,
-    "BB": 0.99,  "BD": 1.16,  "BE": 0.99,  "BF": 0.99,  "BG": 1.048,
-    "BH": 1.16,  "BJ": 0.9,   "BK": 0.9,   "BL": 0.9,   "BM": 0.9,
-    "BN": 0.99,  "BO": 0.99,  "BP": 0.99,  "BQ": 0.99,  "BR": 0.99,
-    "BS": 0.99,  "BT": 0.954, "BU": 0.954, "BV": 0.954, "BW": 0.954,
-    "BX": 0.954, "BY": 0.954, "BZ": 1.048, "CA": 0.954, "CB": 0.954,
-    "CC": 0.954, "CD": 0.954, "CE": 0.954, "CF": 0.954, "CG": 1.048,
-    "CH": 1.048, "CI": 1.16,  "CJ": 1.048, "CK": 1.16,  "CL": 1.16,
-    "CM": 1.16,  "CN": 1.16,  "CO": 1.16,  "CP": 1.16,
-}
-ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC", "AX", "BC")
+# «Всегда-плоские» слагаемые формулы «Затраты» (множитель 1) вне диапазона
+# кабинетов: AC — расход 8connect (лежит до AR). Коэффициенты остальных колонок
+# больше не хардкодятся, а читаются динамически из строки 1 листа над именем
+# кабинета (см. CABINET_COEFF_RANGE / _parse_coeff): число → множитель, пусто/
+# символ → 1.
+ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC",)
 
+# Шапка кабинетов: имена — в строке 2 (матчинг spent), коэффициенты (НДС/комиссии)
+# — в строке 1 над именем. Оба диапазона читаются с одинаковым сдвигом от AR.
 CABINET_HEADER_RANGE = "AR2:EZ2"
+CABINET_COEFF_RANGE  = "AR1:EZ1"
 FALLBACK_START_ROW   = 37
 FALLBACK_NAME_COL    = "A"
 FALLBACK_SPENT_COL   = "B"
@@ -260,15 +258,22 @@ def _build_dohod_vitrina_formula(row: int, sumwebmaster: float) -> str:
     return f"={literal}-{COL_8CONN_CHARGE}{row}"
 
 
-def _build_zatraty_formula(row: int) -> str:
+def _build_zatraty_formula(row: int, coeffs: Dict[str, float]) -> str:
     """Собирает формулу «Затрат» для заданной строки.
+
+    `coeffs` — карта `колонка → множитель` по кабинетам с именем в строке 2
+    (коэффициент из строки 1 листа; пусто/символ → 1). ZATRATY_PLAIN_COLS
+    добавляются как есть (множитель 1), вне диапазона кабинетов.
 
     Формат коэффициента — с запятой в качестве десятичного разделителя,
     т.к. таблица в русской локали (USER_ENTERED парсит по локали).
     """
     parts: List[str] = [f"{col}{row}" for col in ZATRATY_PLAIN_COLS]
-    for col, k in ZATRATY_COEFFS.items():
-        parts.append(f"{col}{row}*{f'{k:g}'.replace('.', ',')}")
+    for col, k in coeffs.items():
+        if k == 1:
+            parts.append(f"{col}{row}")
+        else:
+            parts.append(f"{col}{row}*{f'{k:g}'.replace('.', ',')}")
     return "=" + "+".join(parts)
 
 
@@ -279,6 +284,27 @@ def _find_first_empty_fallback_row(ws: Any) -> int:
     while row - 1 < len(values) and (values[row - 1] or "").strip():
         row += 1
     return row
+
+
+def _parse_coeff(cell: Any) -> float:
+    """Коэффициент из ячейки строки 1. Пусто / не-число / ≤0 → 1.0.
+
+    Понимает оба рендера ячейки: UNFORMATTED_VALUE (число) и FORMATTED_VALUE
+    (строка «1,16» — запятая приводится к точке).
+    """
+    if isinstance(cell, bool):          # bool — подтип int, отсекаем явно
+        return 1.0
+    if isinstance(cell, (int, float)):
+        k = float(cell)
+    else:
+        s = str(cell or "").strip().replace(",", ".")
+        if not s:
+            return 1.0
+        try:
+            k = float(s)
+        except ValueError:
+            return 1.0
+    return k if 0.0 < k < float("inf") else 1.0
 
 
 def _build_gsheets_spreadsheet(config: Dict[str, Any]) -> Optional[Any]:
@@ -445,6 +471,34 @@ def write_daily_report(
         for col, formula in template.items()
     ]
 
+    # --- Шапка кабинетов (строка 2) + коэффициенты «Затрат» (строка 1) ---
+    # Читаем ДО сборки batch: D-формула ниже строится из coeffs_map.
+    header_row = ws.get(CABINET_HEADER_RANGE)  # [[имя1, имя2, ...]]
+    header_cells: List[str] = header_row[0] if header_row else []
+    try:
+        coeff_row = ws.get(CABINET_COEFF_RANGE, value_render_option="UNFORMATTED_VALUE")
+    except TypeError:  # старый gspread без kwarg'а
+        coeff_row = ws.get(CABINET_COEFF_RANGE)
+    coeff_cells: List[Any] = coeff_row[0] if coeff_row else []
+
+    headers_map: Dict[str, str] = {}
+    coeffs_map: Dict[str, float] = {}
+    start_col_idx = _col_index("AR")
+    for offset, cell in enumerate(header_cells):
+        norm = _norm(cell)
+        if not norm:
+            continue
+        col = _col_letter(start_col_idx + offset)
+        headers_map.setdefault(norm, col)
+        # Коэффициент — из строки 1 над именем (тот же offset). Пусто → 1.
+        raw = coeff_cells[offset] if offset < len(coeff_cells) else None
+        coeffs_map[col] = _parse_coeff(raw)
+
+    logger.info("Sheets: заголовки шапки (%d): %s", len(headers_map),
+                {v: k for k, v in list(headers_map.items())})
+    non_unit = {c: k for c, k in coeffs_map.items() if k != 1}
+    logger.info("Sheets: коэффициенты ≠1 (%d): %s", len(non_unit), non_unit)
+
     batch: List[Dict[str, Any]] = template_batch + [
         # AC — слагаемое формулы D; пишем ДО D, чтобы batch_update увидел актуальное значение.
         {"range": f"{COL_8CONN_COST}{date_row}",     "values": [[fixed["eightconnect_cost"]]]},
@@ -456,27 +510,14 @@ def write_daily_report(
         {"range": f"{COL_DOHOD_VITRINA}{date_row}",  "values": [[_build_dohod_vitrina_formula(date_row, fixed["prihod"])]]},
         # C (Приход) — формула =AE+AJ+AF+R (AF пишется чуть выше).
         {"range": f"{COL_PRIHOD}{date_row}",         "values": [[_build_prihod_formula(date_row)]]},
-        {"range": f"{COL_ZATRATY}{date_row}",        "values": [[_build_zatraty_formula(date_row)]]},
+        {"range": f"{COL_ZATRATY}{date_row}",        "values": [[_build_zatraty_formula(date_row, coeffs_map)]]},
         {"range": f"{COL_CLICKS_LT}{date_row}",      "values": [[fixed["clicks_lt"]]]},
         {"range": f"{COL_METRIKA_V}{date_row}",      "values": [[fixed["metrika_v"]]]},
         {"range": f"{COL_ZAYAVKI}{date_row}",        "values": [[fixed["zayavki"]]]},
         {"range": f"{COL_PEREHODY}{date_row}",       "values": [[fixed["perehody"]]]},
     ]
 
-    # --- Матчинг кабинетов ---
-    header_row = ws.get(CABINET_HEADER_RANGE)  # [[h1, h2, ...]]
-    header_cells: List[str] = header_row[0] if header_row else []
-    headers_map: Dict[str, str] = {}
-    start_col_idx = _col_index("AR")
-    for offset, cell in enumerate(header_cells):
-        norm = _norm(cell)
-        if not norm:
-            continue
-        headers_map.setdefault(norm, _col_letter(start_col_idx + offset))
-
-    logger.info("Sheets: заголовки шапки (%d): %s", len(headers_map),
-                {v: k for k, v in list(headers_map.items())})
-
+    # --- Матчинг кабинетов (headers_map собран выше вместе с коэффициентами) ---
     cabinets = _collect_cabinets(report)
     logger.info("Sheets: кабинеты из отчёта (%d): %s", len(cabinets),
                 [(n, s) for n, _, s in cabinets])
