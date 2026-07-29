@@ -18,6 +18,7 @@ FastAPI lifespan, при изменении любого расписания jo
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import date, datetime, timedelta
@@ -58,6 +59,11 @@ class ReportScheduler:
         self._last_runs: Dict[str, Dict[str, Any]] = {}
         # снапшот расписаний {pid: schedule} для watcher'а
         self._last_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
+        # build_report ушёл в отдельный поток, поэтому бренды с одинаковым временем
+        # (или ручной прогон поверх cron'а) могли бы собираться параллельно. Сборку
+        # держим строго по одному: sheets_writer кэширует шаблон формул в модульном
+        # словаре, да и внешние API незачем дёргать в несколько потоков.
+        self._run_lock = asyncio.Lock()
 
     def start(self) -> None:
         if not self._scheduler.running:
@@ -226,7 +232,10 @@ class ReportScheduler:
         label = "manual" if manual else "cron"
         started_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
         try:
-            report = build_report(config, target_day, sub1)
+            # build_report — синхронный и ходит по сети минуты; на event loop'е он
+            # заморозил бы весь uvicorn (морда ловит NetworkError, healthcheck падает).
+            async with self._run_lock:
+                report = await asyncio.to_thread(build_report, config, target_day, sub1)
             out_file = self._output_dir / f"{target_day.isoformat()}_{sub1}__{pid}.json"
             out_file.parent.mkdir(parents=True, exist_ok=True)
             out_file.write_text(
