@@ -70,9 +70,6 @@ ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC",)
 # — в строке 1 над именем. Оба диапазона читаются с одинаковым сдвигом от AR.
 CABINET_HEADER_RANGE = "AR2:EZ2"
 CABINET_COEFF_RANGE  = "AR1:EZ1"
-FALLBACK_START_ROW   = 37
-FALLBACK_NAME_COL    = "A"
-FALLBACK_SPENT_COL   = "B"
 
 TARGET_GOAL_FOR_ZAYAVKI = "Zayvka"
 
@@ -277,15 +274,6 @@ def _build_zatraty_formula(row: int, coeffs: Dict[str, float]) -> str:
     return "=" + "+".join(parts)
 
 
-def _find_first_empty_fallback_row(ws: Any) -> int:
-    """Первая пустая строка от FALLBACK_START_ROW в колонке A."""
-    values = ws.col_values(_col_index(FALLBACK_NAME_COL))
-    row = FALLBACK_START_ROW
-    while row - 1 < len(values) and (values[row - 1] or "").strip():
-        row += 1
-    return row
-
-
 def _parse_coeff(cell: Any) -> float:
     """Коэффициент из ячейки строки 1. Пусто / не-число / ≤0 → 1.0.
 
@@ -409,7 +397,7 @@ def write_daily_report(
           "worksheet": "Апрель 26",
           "date_row": 20,
           "matched": [{"name", "spent", "column", "source"}, ...],
-          "unmatched": [{"name", "spent", "source", "row"}, ...],
+          "unmatched": [{"name", "spent", "source"}, ...],  # в таблицу не пишутся
           "fixed": {"prihod": .., "clicks_lt": .., ...},
           "error": "... (если что-то сломалось)",
         }
@@ -538,24 +526,21 @@ def write_daily_report(
     for col, total_spent in by_col_spent.items():
         batch.append({"range": f"{col}{date_row}", "values": [[round(total_spent, 2)]]})
 
-    # --- Fallback: дописываем unmatched начиная с первой пустой строки ≥37 ---
-    fallback_rows: List[Dict[str, Any]] = []
-    if unmatched:
-        start_row = _find_first_empty_fallback_row(ws)
-        for idx, (name, spent, source) in enumerate(unmatched):
-            row = start_row + idx
-            batch.append({"range": f"{FALLBACK_NAME_COL}{row}",  "values": [[name]]})
-            batch.append({"range": f"{FALLBACK_SPENT_COL}{row}", "values": [[round(spent, 2)]]})
-            fallback_rows.append({"name": name, "spent": spent, "source": source, "row": row})
+    # Кабинеты без колонки в шапке в таблицу НЕ пишем (раньше складывались
+    # «про запас» в A37↓ и бесконечно копились, пока лист не упирался в лимит
+    # 1000 строк). Они остаются в JSON-отчёте и в сводке ниже.
+    unmatched_out = [
+        {"name": name, "spent": spent, "source": source}
+        for name, spent, source in unmatched
+    ]
 
     if batch:
         ws.batch_update(batch, value_input_option="USER_ENTERED")
 
     logger.info(
-        "Sheets: %s / row %d — fixed=%s, matched=%d cabs, unmatched=%d (→ A%d↓), "
+        "Sheets: %s / row %d — fixed=%s, matched=%d cabs, unmatched=%d (в таблицу не пишутся), "
         "template-formulas=%d",
-        title, date_row, fixed, len(matched), len(fallback_rows),
-        fallback_rows[0]["row"] if fallback_rows else 0,
+        title, date_row, fixed, len(matched), len(unmatched_out),
         len(template_batch),
     )
 
@@ -565,6 +550,6 @@ def write_daily_report(
         "date_row": date_row,
         "fixed": fixed,
         "matched": matched,
-        "unmatched": fallback_rows,
+        "unmatched": unmatched_out,
         "template_formulas": len(template_batch),
     }

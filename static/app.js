@@ -569,10 +569,7 @@ function renderReport(data) {
   } else {
     const nMatched = (gs.matched || []).length;
     const nUnmatched = (gs.unmatched || []).length;
-    const fallbackRange = nUnmatched
-      ? ` · fallback A${gs.unmatched[0].row}…A${gs.unmatched[nUnmatched - 1].row}`
-      : "";
-    gsEl.textContent = `Google Sheets ✅ «${gs.worksheet}», строка ${gs.date_row} · matched ${nMatched}, unmatched ${nUnmatched}${fallbackRange}`;
+    gsEl.textContent = `Google Sheets ✅ «${gs.worksheet}», строка ${gs.date_row} · matched ${nMatched}, unmatched ${nUnmatched}`;
     gsEl.className = "status ok";
   }
 
