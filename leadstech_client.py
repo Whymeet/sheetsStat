@@ -68,7 +68,15 @@ class LeadstechClient:
 
         logger.info("Leadstech: авторизация для логина %s", self.cfg.login)
 
-        resp = requests.post(self._login_url, headers=headers, json=payload, timeout=30)
+        resp = self._request_with_retry(
+            method="post",
+            url=self._login_url,
+            headers=headers,
+            json=payload,
+            timeout=30,
+            max_retries=4,
+            retry_delay=2.0,
+        )
         resp.raise_for_status()
 
         data = resp.json()
@@ -192,7 +200,7 @@ class LeadstechClient:
             headers=headers,
             params=params,
             timeout=30,
-            max_retries=3,
+            max_retries=4,
             retry_delay=2.0,
         )
 

@@ -281,12 +281,28 @@ def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str,
     Плюс кладём несколько полезных полей (raw clicks, conversions, approved,
     rejected, CR, AR) — пригодятся в будущем без правок API.
     """
-    lt_client = build_leadstech_client(config)
-    summary = lt_client.get_summary_by_sub1(
-        date_from=day,
-        date_to=day,
-        sub1_value=sub1,
-    )
+    try:
+        lt_client = build_leadstech_client(config)
+        summary = lt_client.get_summary_by_sub1(
+            date_from=day,
+            date_to=day,
+            sub1_value=sub1,
+        )
+    except Exception as e:
+        logger.error("LeadsTech error: %s", e, exc_info=True)
+        return {
+            "clicks": 0,
+            "hosts": 0,
+            "sum": 0.0,
+            "raw_clicks": 0,
+            "conversions": 0,
+            "approved": 0,
+            "rejected": 0,
+            "inprogress": 0,
+            "CR": 0.0,
+            "AR": 0.0,
+            "errors": [{"error": str(e)}],
+        }
 
     return {
         "clicks": _to_int(summary.get("uniques")),       # по требованию: «клики» = uniques

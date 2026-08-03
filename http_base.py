@@ -46,7 +46,7 @@ class JWTAuthClient:
     DEFAULT_TIMEOUT: int = 60
     # Сколько раз повторить запрос после транзиентного таймаута/обрыва
     # (0 = без повторов). Пауза между попытками — RETRY_BACKOFF секунд.
-    MAX_RETRIES: int = 1
+    MAX_RETRIES: int = 3
     RETRY_BACKOFF: float = 1.5
 
     def __init__(self, cfg: JWTClientConfig, timeout: Optional[int] = None):
