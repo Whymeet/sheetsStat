@@ -155,6 +155,13 @@
               <tr><th>Конверсии / approved / rejected</th><td class="num" id="lt-conv">—</td></tr>
             </tbody>
           </table>
+          <table id="leadstech-accounts-table" style="display:none;">
+            <thead>
+              <tr><th>Аккаунт</th><th>sub1</th><th class="num">Клики</th><th class="num">Хосты</th><th class="num">Сумма</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div id="lt-error" class="status err" style="margin-top:4px;"></div>
 
           <h3>8connect</h3>
           <table id="eightconnect-table">
@@ -283,14 +290,23 @@
 
         <div class="card">
           <h2>LeadsTech</h2>
-          <div class="grid two">
-            <label>Login
-              <input type="text" id="lt-login" autocomplete="off">
-            </label>
-            <label>Password
-              <input type="password" id="lt-password" autocomplete="off">
-            </label>
-            <label>Base URL
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            Можно указать несколько аккаунтов — в каждый уходит одинаковый запрос за день,
+            а статистика <b>складывается</b>. Пустой <code>sub1</code> в строке = общий sub1 бренда,
+            пустой Base URL = общий ниже. Пустой пароль при сохранении = «оставить прежний».
+          </p>
+          <table id="lt-accounts">
+            <thead>
+              <tr>
+                <th>Название</th><th>Login</th><th>Password</th>
+                <th>sub1</th><th>Base URL</th><th>Вкл.</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <button type="button" id="lt-account-add" class="secondary" style="margin-top:8px;">+ добавить аккаунт</button>
+          <div class="grid two" style="margin-top:12px;">
+            <label>Base URL (общий)
               <input type="text" id="lt-base-url" value="https://api.leads.tech">
             </label>
             <label>Page size

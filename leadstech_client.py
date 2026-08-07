@@ -247,34 +247,41 @@ class LeadstechClient:
         raise ValueError(f"Не удалось вытащить rows из ответа Leadstech: {payload}")
 
 
-# --------- Хелпер: один общий клиент из конфига ---------
+# --------- Хелперы: клиенты из конфига ---------
 
 
-def build_leadstech_client(config: Dict[str, Any]) -> LeadstechClient:
-    lt_cfg = config.get("leadstech", {})
+DEFAULT_BASE_URL = "https://api.leads.tech"
 
-    base_url = lt_cfg.get("base_url", "https://api.leads.tech")
 
-    # либо из конфига, либо из env, если в конфиге пусто
-    login = lt_cfg.get("login") or os.getenv("LEADSTECH_LOGIN")
-    password = lt_cfg.get("password") or os.getenv("LEADSTECH_PASSWORD")
+@dataclass
+class LeadstechAccount:
+    """Один аккаунт LeadsTech из конфига.
 
-    if not login or not password:
-        raise RuntimeError(
-            "Не заданы Leadstech login/password (ни в cfg.leadstech, ни в env)"
-        )
+    `client` == None означает, что аккаунт не сконфигурирован (нет логина или
+    пароля) — причина лежит в `error`. Такой аккаунт не выбрасывает исключение,
+    чтобы один недозаполненный кабинет не обнулял весь LeadsTech.
+    """
 
-    # Поддержка как старого формата (banner_sub_field), так и нового (banner_sub_fields)
-    banner_sub_fields = lt_cfg.get("banner_sub_fields")
-    if not banner_sub_fields:
-        # Для обратной совместимости: если задано старое поле banner_sub_field
-        old_field = lt_cfg.get("banner_sub_field")
-        if old_field:
-            banner_sub_fields = [old_field, "sub5"] if old_field == "sub4" else [old_field]
-        else:
-            banner_sub_fields = ["sub4", "sub5"]
+    name: str
+    sub1: str
+    client: Optional[LeadstechClient] = None
+    error: Optional[str] = None
 
-    client_cfg = LeadstechClientConfig(
+
+def _banner_sub_fields(lt_cfg: Dict[str, Any]) -> List[str]:
+    """Поддержка как старого формата (banner_sub_field), так и нового (banner_sub_fields)."""
+    fields = lt_cfg.get("banner_sub_fields")
+    if fields:
+        return list(fields)
+    old_field = lt_cfg.get("banner_sub_field")
+    if old_field:
+        return [old_field, "sub5"] if old_field == "sub4" else [old_field]
+    return ["sub4", "sub5"]
+
+
+def _client_config(lt_cfg: Dict[str, Any], base_url: str, login: str, password: str) -> LeadstechClientConfig:
+    """Общие для секции параметры запроса + креды конкретного аккаунта."""
+    return LeadstechClientConfig(
         base_url=base_url,
         login=login,
         password=password,
@@ -283,7 +290,66 @@ def build_leadstech_client(config: Dict[str, Any]) -> LeadstechClient:
         untilCurrentTime=int(lt_cfg.get("untilCurrentTime", 0)),
         limitLowerDay=int(lt_cfg.get("limitLowerDay", 0)),
         limitUpperDay=int(lt_cfg.get("limitUpperDay", 0)),
-        banner_sub_fields=banner_sub_fields,
+        banner_sub_fields=_banner_sub_fields(lt_cfg),
     )
 
-    return LeadstechClient(client_cfg)
+
+def build_leadstech_clients(config: Dict[str, Any]) -> List[LeadstechAccount]:
+    """Список аккаунтов LeadsTech: по одному клиенту на каждый набор кредов.
+
+    Форма конфига:
+        leadstech.accounts = [{name, login, password, base_url?, sub1?, enabled?}, ...]
+
+    Обратная совместимость: если `accounts` нет или он пуст, аккаунт синтезируется
+    из legacy-полей `leadstech.login/password` (+ env LEADSTECH_LOGIN/PASSWORD).
+    Секционные параметры запроса (page_size, strictSubs, ...) общие для всех.
+    """
+    lt_cfg = config.get("leadstech") or {}
+    section_base_url = (lt_cfg.get("base_url") or "").strip() or DEFAULT_BASE_URL
+
+    raw_accounts = lt_cfg.get("accounts")
+    if not isinstance(raw_accounts, list) or not raw_accounts:
+        # legacy: одна пара логин/пароль прямо в секции
+        raw_accounts = [{
+            "login": lt_cfg.get("login") or os.getenv("LEADSTECH_LOGIN") or "",
+            "password": lt_cfg.get("password") or os.getenv("LEADSTECH_PASSWORD") or "",
+        }]
+
+    out: List[LeadstechAccount] = []
+    for idx, acc in enumerate(raw_accounts, start=1):
+        if not isinstance(acc, dict):
+            continue
+        if not acc.get("enabled", True):
+            continue
+
+        login = (acc.get("login") or "").strip()
+        password = acc.get("password") or ""
+        name = (acc.get("name") or "").strip() or login or f"аккаунт #{idx}"
+        sub1 = (acc.get("sub1") or "").strip()
+        base_url = (acc.get("base_url") or "").strip() or section_base_url
+
+        if not login or not password:
+            out.append(LeadstechAccount(
+                name=name,
+                sub1=sub1,
+                error="не заданы login/password (вкладка «Настройки» → LeadsTech)",
+            ))
+            continue
+
+        out.append(LeadstechAccount(
+            name=name,
+            sub1=sub1,
+            client=LeadstechClient(_client_config(lt_cfg, base_url, login, password)),
+        ))
+
+    return out
+
+
+def build_leadstech_client(config: Dict[str, Any]) -> LeadstechClient:
+    """Первый рабочий аккаунт LeadsTech одним клиентом (legacy-хелпер)."""
+    for acc in build_leadstech_clients(config):
+        if acc.client is not None:
+            return acc.client
+    raise RuntimeError(
+        "Не заданы Leadstech login/password (ни в cfg.leadstech, ни в env)"
+    )

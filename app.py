@@ -96,6 +96,17 @@ SECRET_FIELDS: List[tuple] = [
     ("eightconnect", "password"),
 ]
 
+# То же, но для секций со списком объектов: (секция, список, поле-секрет).
+# Элементы списка сопоставляются с диском по (base_url, login) — устойчиво к
+# перестановке строк в UI.
+SECRET_LIST_FIELDS: List[tuple] = [
+    ("leadstech", "accounts", "password"),
+]
+
+
+def _account_key(acc: Dict[str, Any]) -> tuple:
+    return ((acc.get("base_url") or "").strip(), (acc.get("login") or "").strip())
+
 
 # ---------- Profiles storage ----------
 
@@ -197,6 +208,7 @@ def _empty_profile_body(name: str, sub1: str = "") -> Dict[str, Any]:
         "name": name,
         "sub1": sub1,
         "leadstech": {"base_url": "https://api.leads.tech", "login": "", "password": "",
+                      "accounts": [],
                       "page_size": 500, "strictSubs": 0, "untilCurrentTime": 0,
                       "limitLowerDay": 0, "limitUpperDay": 0,
                       "banner_sub_fields": ["sub4", "sub5"]},
@@ -292,6 +304,13 @@ def _mask_secrets(cfg: Dict[str, Any]) -> Dict[str, Any]:
     for section, field in SECRET_FIELDS:
         if isinstance(masked.get(section), dict) and masked[section].get(field):
             masked[section][field] = ""
+    for section, list_field, field in SECRET_LIST_FIELDS:
+        items = (masked.get(section) or {}).get(list_field) if isinstance(masked.get(section), dict) else None
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item.get(field):
+                item[field] = ""
     return masked
 
 
@@ -306,15 +325,55 @@ def _merge_preserved_secrets(incoming: Dict[str, Any], on_disk: Dict[str, Any]) 
             preserved = section_on_disk.get(field)
             if preserved:
                 section_in[field] = preserved
+
+    for section, list_field, field in SECRET_LIST_FIELDS:
+        section_in = incoming.get(section)
+        section_on_disk = on_disk.get(section) if isinstance(on_disk, dict) else None
+        if not isinstance(section_in, dict) or not isinstance(section_on_disk, dict):
+            continue
+        items_in = section_in.get(list_field)
+        items_on_disk = section_on_disk.get(list_field)
+        if not isinstance(items_in, list):
+            continue
+        by_key = {
+            _account_key(it): it.get(field)
+            for it in (items_on_disk if isinstance(items_on_disk, list) else [])
+            if isinstance(it, dict) and it.get(field)
+        }
+        # Первое сохранение после появления accounts[]: на диске ещё legacy-креды
+        # в самой секции — отдаём их строке с тем же логином.
+        legacy_login = (section_on_disk.get("login") or "").strip()
+        legacy_secret = section_on_disk.get(field)
+        for item in items_in:
+            if not isinstance(item, dict) or item.get(field):
+                continue
+            preserved = by_key.get(_account_key(item))
+            if not preserved and legacy_secret and (item.get("login") or "").strip() == legacy_login:
+                preserved = legacy_secret
+            if preserved:
+                item[field] = preserved
     return incoming
 
 
 # ---------- Models ----------
 
+class LeadsTechAccount(BaseModel):
+    """Один аккаунт LeadsTech. Стата со всех аккаунтов складывается."""
+
+    name: str = ""
+    login: str = ""
+    password: str = ""
+    base_url: str = ""      # пусто → общий leadstech.base_url
+    sub1: str = ""          # пусто → общий sub1 бренда
+    enabled: bool = True
+
+
 class LeadsTechSettings(BaseModel):
     base_url: str = "https://api.leads.tech"
-    login: str
-    password: str
+    # login/password — legacy «один аккаунт»: читаются, только если accounts пуст
+    login: str = ""
+    password: str = ""
+    accounts: List[LeadsTechAccount] = Field(default_factory=list)
     page_size: int = 500
     strictSubs: int = 0
     untilCurrentTime: int = 0
@@ -586,11 +645,15 @@ def save_profile_config(pid: str, payload: ConfigPayload):
     ym = data.get("yandex_metrika") or {}
     ec = data.get("eightconnect") or {}
     gs = data.get("google_sheets") or {}
+    lt = data.get("leadstech") or {}
+    lt_logins = [a.get("login") for a in (lt.get("accounts") or []) if a.get("login")]
+    if not lt_logins and lt.get("login"):
+        lt_logins = [lt["login"]]
     logger.info(
-        "Profile %r saved: sub1=%s, LT login=%s, AdsManager user=%s, Yandex user=%s, "
+        "Profile %r saved: sub1=%s, LT logins=%s, AdsManager user=%s, Yandex user=%s, "
         "Metrika counter=%s token=%s, 8connect login=%s schemes=%s, Sheets enabled=%s id=%s",
         pid, data.get("sub1"),
-        data["leadstech"]["login"], data["ads_manager"]["username"],
+        ", ".join(lt_logins) or "—", data["ads_manager"]["username"],
         data.get("yandex", {}).get("username", ""),
         ym.get("counter_id", 0), "set" if ym.get("oauth_token") else "empty",
         ec.get("login") or "", ec.get("scheme_ids") or [],

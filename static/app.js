@@ -637,6 +637,31 @@ function renderReport(data) {
     convEl.textContent = `${c} / ${a} / ${r}`;
   }
 
+  // Разбивка по аккаунтам LeadsTech — показываем, только если их больше одного
+  const ltAccounts = Array.isArray(lt.accounts) ? lt.accounts : [];
+  const ltTable = document.getElementById("leadstech-accounts-table");
+  const ltTbody = ltTable.querySelector("tbody");
+  ltTbody.innerHTML = "";
+  ltTable.style.display = ltAccounts.length > 1 ? "" : "none";
+  ltAccounts.forEach(a => {
+    const tr = document.createElement("tr");
+    const nameCell = a.error
+      ? `${escapeHtml(a.account || "—")} <span class="status err" style="font-size:11px">${escapeHtml(a.error)}</span>`
+      : escapeHtml(a.account || "—");
+    tr.innerHTML = `<td>${nameCell}</td>
+      <td>${escapeHtml(a.sub1 || "—")}</td>
+      <td class="num">${(a.clicks ?? 0).toLocaleString("ru-RU")}</td>
+      <td class="num">${(a.hosts ?? 0).toLocaleString("ru-RU")}</td>
+      <td class="num">${fmtMoney(a.sum)}</td>`;
+    ltTbody.appendChild(tr);
+  });
+
+  const ltErrEl = document.getElementById("lt-error");
+  const ltErrs = Array.isArray(lt.errors) ? lt.errors : [];
+  ltErrEl.textContent = ltErrs.length
+    ? "❌ " + ltErrs.map(e => (e.account ? `${e.account}: ` : "") + (e.error || JSON.stringify(e))).join("; ")
+    : "";
+
   // 8connect
   const ec = data.eightconnect || {};
   document.getElementById("ec-cost").textContent = fmtMoney(ec.cost);
@@ -691,7 +716,7 @@ const DEFAULT_ADS_MANAGER_BASE_URL = "https://kybyshka-dev.ru";
 function emptyConfig() {
   return {
     name: "", sub1: "",
-    leadstech: { base_url: "https://api.leads.tech", login: "", password: "", page_size: 500 },
+    leadstech: { base_url: "https://api.leads.tech", login: "", password: "", accounts: [], page_size: 500 },
     ads_manager: { base_url: DEFAULT_ADS_MANAGER_BASE_URL, username: "", password: "" },
     yandex: { base_url: "", username: "", password: "" },
     yandex_metrika: { oauth_token: "", counter_id: 0, goals: ["Zayvka"], attribution: "LASTSIGN" },
@@ -703,9 +728,66 @@ function emptyConfig() {
   };
 }
 
+// ---------- Аккаунты LeadsTech (стата со всех складывается) ----------
+
+function ltAccountRow(acc) {
+  const a = acc || {};
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input type="text" data-lt="name" placeholder="напр. Основной"></td>
+    <td><input type="text" data-lt="login" autocomplete="off"></td>
+    <td><input type="password" data-lt="password" autocomplete="off" placeholder="пусто — не менять"></td>
+    <td><input type="text" data-lt="sub1" placeholder="общий"></td>
+    <td><input type="text" data-lt="base_url" placeholder="общий"></td>
+    <td class="num"><input type="checkbox" data-lt="enabled"></td>
+    <td><button type="button" class="danger sm" data-lt-del title="Удалить аккаунт">🗑</button></td>`;
+  tr.querySelector('[data-lt="name"]').value = a.name ?? "";
+  tr.querySelector('[data-lt="login"]').value = a.login ?? "";
+  tr.querySelector('[data-lt="password"]').value = a.password ?? "";
+  tr.querySelector('[data-lt="sub1"]').value = a.sub1 ?? "";
+  tr.querySelector('[data-lt="base_url"]').value = a.base_url ?? "";
+  tr.querySelector('[data-lt="enabled"]').checked = a.enabled !== false;
+  tr.querySelector("[data-lt-del]").addEventListener("click", () => tr.remove());
+  return tr;
+}
+
+function renderLeadstechAccounts(lt) {
+  const tbody = document.querySelector("#lt-accounts tbody");
+  tbody.innerHTML = "";
+  let accounts = Array.isArray(lt?.accounts) ? lt.accounts : [];
+  // legacy-профиль: креды лежали прямо в секции — показываем их одной строкой
+  if (!accounts.length && (lt?.login || lt?.password)) {
+    accounts = [{ name: "", login: lt.login, password: lt.password, sub1: "", base_url: "", enabled: true }];
+  }
+  if (!accounts.length) accounts = [{}];
+  accounts.forEach(a => tbody.appendChild(ltAccountRow(a)));
+}
+
+function readLeadstechAccounts() {
+  const rows = document.querySelectorAll("#lt-accounts tbody tr");
+  const out = [];
+  rows.forEach(tr => {
+    const get = (k) => tr.querySelector(`[data-lt="${k}"]`);
+    const login = get("login").value.trim();
+    if (!login) return;   // пустая строка — просто не сохраняем
+    out.push({
+      name: get("name").value.trim(),
+      login,
+      password: get("password").value,
+      sub1: get("sub1").value.trim(),
+      base_url: get("base_url").value.trim(),
+      enabled: get("enabled").checked,
+    });
+  });
+  return out;
+}
+
+document.getElementById("lt-account-add").addEventListener("click", () => {
+  document.querySelector("#lt-accounts tbody").appendChild(ltAccountRow({}));
+});
+
 function renderConfig(cfg) {
-  document.getElementById("lt-login").value = cfg.leadstech?.login ?? "";
-  document.getElementById("lt-password").value = cfg.leadstech?.password ?? "";
+  renderLeadstechAccounts(cfg.leadstech);
   document.getElementById("lt-base-url").value = cfg.leadstech?.base_url ?? "https://api.leads.tech";
   document.getElementById("lt-page-size").value = cfg.leadstech?.page_size ?? 500;
 
@@ -848,8 +930,10 @@ document.getElementById("save-config").addEventListener("click", async () => {
     sub1: document.getElementById("profile-sub1").value.trim(),
     leadstech: {
       base_url: document.getElementById("lt-base-url").value.trim(),
-      login: document.getElementById("lt-login").value.trim(),
-      password: document.getElementById("lt-password").value,
+      // legacy-поля больше не редактируются, но и не затираются
+      login: _cfgState?.leadstech?.login ?? "",
+      password: _cfgState?.leadstech?.password ?? "",
+      accounts: readLeadstechAccounts(),
       page_size: parseInt(document.getElementById("lt-page-size").value, 10) || 500,
     },
     ads_manager: {

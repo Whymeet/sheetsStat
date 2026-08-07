@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from ads_manager_client import AdsManagerClient, AdsManagerConfig
 from eightconnect_client import build_eightconnect_client
-from leadstech_client import build_leadstech_client
+from leadstech_client import build_leadstech_clients
 from sheets_writer import write_daily_report
 from yandex_client import YandexAdsManagerClient, YandexAdsManagerConfig
 from yandex_metrika_client import YandexMetrikaClient, YandexMetrikaConfig
@@ -270,40 +270,22 @@ def collect_yandex_metrika(config: Dict[str, Any], day: date) -> Dict[str, Any]:
     return result
 
 
-def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]:
-    """Агрегат LeadsTech за день по sub1.
+# Аддитивные поля LeadsTech: складываются между аккаунтами как есть.
+# CR/AR — проценты, их считаем отдельно (`_leadstech_ratios`).
+_LEADSTECH_ZEROS: Dict[str, Any] = {
+    "clicks": 0,
+    "hosts": 0,
+    "sum": 0.0,
+    "raw_clicks": 0,
+    "conversions": 0,
+    "approved": 0,
+    "rejected": 0,
+    "inprogress": 0,
+}
 
-    Берём готовый `data.summary` из ответа LeadsTech одним запросом — там уже
-    просуммировано по всем строкам, соответствующим фильтру sub1. Маппинг:
-      - «клики» в отчёте = summary.uniques (уникальные клики)
-      - «хосты»           = summary.hosts
-      - «сумма»           = summary.sumwebmaster
-    Плюс кладём несколько полезных полей (raw clicks, conversions, approved,
-    rejected, CR, AR) — пригодятся в будущем без правок API.
-    """
-    try:
-        lt_client = build_leadstech_client(config)
-        summary = lt_client.get_summary_by_sub1(
-            date_from=day,
-            date_to=day,
-            sub1_value=sub1,
-        )
-    except Exception as e:
-        logger.error("LeadsTech error: %s", e, exc_info=True)
-        return {
-            "clicks": 0,
-            "hosts": 0,
-            "sum": 0.0,
-            "raw_clicks": 0,
-            "conversions": 0,
-            "approved": 0,
-            "rejected": 0,
-            "inprogress": 0,
-            "CR": 0.0,
-            "AR": 0.0,
-            "errors": [{"error": str(e)}],
-        }
 
+def _leadstech_row(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """`data.summary` LeadsTech → аддитивные поля отчёта."""
     return {
         "clicks": _to_int(summary.get("uniques")),       # по требованию: «клики» = uniques
         "hosts": _to_int(summary.get("hosts")),
@@ -313,9 +295,76 @@ def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str,
         "approved": _to_int(summary.get("approved")),
         "rejected": _to_int(summary.get("rejected")),
         "inprogress": _to_int(summary.get("inprogress")),
-        "CR": _to_float(summary.get("CR")),
-        "AR": _to_float(summary.get("AR")),
     }
+
+
+def _leadstech_ratios(totals: Dict[str, Any]) -> Dict[str, float]:
+    """CR/AR по итоговым счётчикам — суммировать проценты нельзя.
+
+    Формулы те же, что отдаёт LeadsTech (CR = конверсии / уники,
+    AR = апрув / конверсии), поэтому при одном аккаунте значения совпадают
+    с тем, что приходило раньше напрямую из summary.
+    """
+    clicks = totals["clicks"]
+    conversions = totals["conversions"]
+    return {
+        "CR": round(conversions / clicks * 100, 2) if clicks else 0.0,
+        "AR": round(totals["approved"] / conversions * 100, 2) if conversions else 0.0,
+    }
+
+
+def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]:
+    """Агрегат LeadsTech за день по sub1, суммарно по всем аккаунтам.
+
+    Берём готовый `data.summary` из ответа LeadsTech одним запросом на аккаунт —
+    там уже просуммировано по всем строкам, соответствующим фильтру sub1.
+    Маппинг: «клики» = summary.uniques, «хосты» = hosts, «сумма» = sumwebmaster.
+
+    Аккаунты задаются в `leadstech.accounts[]`; у каждого может быть свой sub1
+    (пусто → общий sub1 бренда). Упавший аккаунт не валит отчёт: его цифры
+    считаются нулями, ошибка ложится в `errors` и в его строку `accounts[]`.
+    """
+    accounts = build_leadstech_clients(config)
+
+    totals: Dict[str, Any] = dict(_LEADSTECH_ZEROS)
+    per_account: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+
+    if not accounts:
+        errors.append({"error": "не задан ни один аккаунт LeadsTech "
+                                "(вкладка «Настройки» → LeadsTech)"})
+
+    for acc in accounts:
+        acc_sub1 = acc.sub1 or sub1
+        if acc.client is None:
+            errors.append({"account": acc.name, "error": acc.error or "аккаунт не сконфигурирован"})
+            per_account.append({"account": acc.name, "sub1": acc_sub1,
+                                **_LEADSTECH_ZEROS, "error": acc.error})
+            continue
+
+        try:
+            summary = acc.client.get_summary_by_sub1(
+                date_from=day,
+                date_to=day,
+                sub1_value=acc_sub1,
+            )
+        except Exception as e:
+            logger.error("LeadsTech error (%s): %s", acc.name, e, exc_info=True)
+            errors.append({"account": acc.name, "error": str(e)})
+            per_account.append({"account": acc.name, "sub1": acc_sub1,
+                                **_LEADSTECH_ZEROS, "error": str(e)})
+            continue
+
+        row = _leadstech_row(summary)
+        for key in _LEADSTECH_ZEROS:
+            totals[key] += row[key]
+        per_account.append({"account": acc.name, "sub1": acc_sub1, **row})
+
+    totals["sum"] = round(totals["sum"], 2)
+    result: Dict[str, Any] = {**totals, **_leadstech_ratios(totals), "accounts": per_account}
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 _OUTPUT_DIR = Path(__file__).resolve().parent / "output"

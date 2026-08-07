@@ -37,12 +37,20 @@ Healthcheck: `GET /api/health` → `{"ok": true}`.
 | VK Ads (через Ads Manager vktest2) | `ads_manager_client.py` | `GET /api/telegram/daily-stats?date=&label=<sub1>` — spent по кабинетам пользователя |
 | Yandex Direct (через свой Ads Manager) | `yandex_client.py` | то же, но Яндекс |
 | Яндекс.Метрика | `yandex_metrika_client.py` | `visits`/`pageviews`/`users` счётчика + достижения по списку целей |
-| LeadsTech | `leadstech_client.py` | `data.summary` из `/v1/front/stat/by-subid` по `sub1` |
+| LeadsTech | `leadstech_client.py` | `data.summary` из `/v1/front/stat/by-subid` по `sub1`, **сумма по всем аккаунтам** |
 | 8connect | `eightconnect_client.py` | `/api/report/list` → суммы cost/charge по `scheme_ids` |
 
 Важный архитектурный принцип: **sheetsStat НЕ хранит VK/Yandex токены и список кабинетов**. Для VK/Yandex ходим в отдельные Ads Manager-ы (`kybyshka-dev.ru`, `yamanager.kybyshka-dev.ru`) по логину/паролю пользователя — JWT получаем через `POST /api/auth/login`, кабинеты привязаны к пользователю на стороне Ads Manager. Истёкший токен автоматически перевыпускается в `_get` (401 → relogin → retry).
 
 Общая JWT-механика (login, _get с авто-relogin) живёт в `http_base.JWTAuthClient`; `AdsManagerClient` и `YandexAdsManagerClient` — тонкие наследники, добавляющие свой `get_daily_stats` (VK пробрасывает `label`, Yandex — нет). Одна общая функция `core._collect_ads_stats` обходит `accounts[]` и превращает ответ в унифицированный `{cabinets, total, errors}`.
+
+### Несколько аккаунтов LeadsTech
+
+У LeadsTech, в отличие от VK/Yandex, кабинеты **не** привязаны к одному логину, поэтому список аккаунтов хранится у нас: `leadstech.accounts: [{name, login, password, base_url?, sub1?, enabled}]`. `leadstech_client.build_leadstech_clients()` разворачивает его в клиенты (по одному на набор кредов); секционные параметры запроса — `page_size`, `strictSubs`, `untilCurrentTime`, `limitLowerDay`, `limitUpperDay`, `banner_sub_fields` — общие для всех аккаунтов. Пустой `base_url` в строке = общий `leadstech.base_url`, пустой `sub1` = общий `sub1` бренда.
+
+`core.collect_leadstech` шлёт одинаковый запрос за день в каждый аккаунт и **складывает** аддитивные поля (`clicks/hosts/sum/raw_clicks/conversions/approved/rejected/inprogress`) — именно эти суммы уезжают в Sheets. `CR`/`AR` — проценты, их нельзя складывать: они пересчитываются из итоговых счётчиков (`_leadstech_ratios`). Разбивка по аккаунтам лежит в `leadstech.accounts[]` отчёта; упавший аккаунт даёт нули + `error` в своей строке и запись в `leadstech.errors`, отчёт при этом собирается с частичной суммой.
+
+Обратная совместимость: если `accounts` пуст, аккаунт синтезируется из legacy-полей `leadstech.login/password` (+ env `LEADSTECH_LOGIN`/`LEADSTECH_PASSWORD`), поэтому старые профили работают без правок файлов — миграции при старте нет. Пароли аккаунтов маскируются в `GET .../config` и восстанавливаются с диска при сохранении через `app.SECRET_LIST_FIELDS` (сопоставление строк по `(base_url, login)`); обычный `SECRET_FIELDS` умеет только плоские секции.
 
 ### Конфиг и профили (бренды)
 
