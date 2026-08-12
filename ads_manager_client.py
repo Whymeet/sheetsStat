@@ -31,9 +31,13 @@ class AdsManagerClient(JWTAuthClient):
         self,
         day: date,
         label: Optional[str] = None,
+        all_accounts: bool = False,
     ) -> Dict[str, Any]:
         """
-        GET /api/telegram/daily-stats?date=YYYY-MM-DD[&label=...]
+        GET /api/telegram/daily-stats?date=YYYY-MM-DD[&label=...][&all=true]
+
+        all_accounts=True — сервер отдаёт ВСЕ кабинеты пользователя (игнорирует
+        label и флаг include_in_daily_stats на стороне Ads Manager).
 
         Возвращает:
             {
@@ -46,6 +50,8 @@ class AdsManagerClient(JWTAuthClient):
         params: Dict[str, Any] = {"date": day.isoformat()}
         if label:
             params["label"] = label
+        if all_accounts:
+            params["all"] = "true"
 
         resp = self._get("/api/telegram/daily-stats", params)
         if resp.status_code != 200:

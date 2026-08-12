@@ -34,7 +34,7 @@ Healthcheck: `GET /api/health` → `{"ok": true}`.
 
 | Источник | Клиент | Что берём |
 |---|---|---|
-| VK Ads (через Ads Manager vktest2) | `ads_manager_client.py` | `GET /api/telegram/daily-stats?date=&label=<sub1>` — spent по кабинетам пользователя |
+| VK Ads (через Ads Manager vktest2) | `ads_manager_client.py` | `GET /api/telegram/daily-stats?date=&all=true` — spent по ВСЕМ кабинетам пользователя (label не фильтрует с 2026-08-12) |
 | Yandex Direct (через свой Ads Manager) | `yandex_client.py` | то же, но Яндекс |
 | Яндекс.Метрика | `yandex_metrika_client.py` | `visits`/`pageviews`/`users` счётчика + достижения по списку целей |
 | LeadsTech | `leadstech_client.py` | `data.summary` из `/v1/front/stat/by-subid` по `sub1`, **сумма по всем аккаунтам** |

@@ -54,6 +54,7 @@ def _collect_ads_stats(
     missing_creds_msg: str,
     log_prefix: str,
     label: Optional[str] = None,
+    all_accounts: bool = False,
     require_base_url: bool = False,
     server_label_override: Any = _UNSET,
 ) -> Dict[str, Any]:
@@ -84,7 +85,12 @@ def _collect_ads_stats(
     client = client_factory(base_url, username, password)
 
     try:
-        raw = client.get_daily_stats(day, label=label) if label is not None else client.get_daily_stats(day)
+        kwargs: Dict[str, Any] = {}
+        if label is not None:
+            kwargs["label"] = label
+        if all_accounts:
+            kwargs["all_accounts"] = True
+        raw = client.get_daily_stats(day, **kwargs)
     except Exception as e:
         logger.error("%s error: %s", log_prefix, e, exc_info=True)
         return {"cabinets": {}, "total": 0.0, "errors": [{"error": str(e)}]}
@@ -116,7 +122,12 @@ def collect_ads_manager(
     day: date,
     label: str,
 ) -> Dict[str, Any]:
-    """Расход VK Ads за день по label (sub1) через Ads Manager."""
+    """Расход VK Ads за день через Ads Manager — по ВСЕМ кабинетам пользователя.
+
+    `label` (sub1) больше не фильтрует кабинеты: сервер зовётся с all=true и
+    отдаёт расходы всех кабинетов (решение 2026-08-12 — в таблички едет всё;
+    в Sheets всё равно попадают только кабинеты, найденные в шапке листа).
+    """
     return _collect_ads_stats(
         section="ads_manager",
         section_cfg=config.get("ads_manager") or {},
@@ -126,7 +137,8 @@ def collect_ads_manager(
         ),
         missing_creds_msg="ads_manager: нужно задать username и password (зайди во вкладку «Настройки»)",
         log_prefix="AdsManager",
-        label=label,
+        all_accounts=True,
+        server_label_override=label,
     )
 
 
