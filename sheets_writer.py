@@ -20,13 +20,16 @@
 (`leadstech.accounts[]` в конфиге); разбивка лежит в `leadstech.accounts` отчёта
 и в таблицу не пишется.
 
-В строке 2 (`AR2:EZ2`) лежат названия рекламных кабинетов. По каждому spent'у из
-отчёта ищем свою колонку и пишем spent в `{col}{date_row}`. Кабинеты, которых нет
-в шапке, добавляем стопкой начиная с A37 (A=имя, B=spent) — «чтобы не пропали».
+В строке 2 (`AR2:EZ2`, обрезано по реальной ширине листа — см. `_cabinet_ranges`)
+лежат названия рекламных кабинетов. По каждому spent'у из отчёта ищем свою
+колонку и пишем spent в `{col}{date_row}`. Кабинеты, которых нет в шапке (в т.ч.
+из-за того, что лист физически уже EZ), в таблицу не пишутся — видны в JSON-отчёте
+и в счётчике `unmatched`.
 
     D  — Затраты           = формула Σ(расход_i * коэф_i) + AC (8connect).
-Коэффициент кабинета берётся динамически из строки 1 (`AR1:EZ1`) над его именем:
-число → множитель, пусто/символ → 1 (см. `_parse_coeff` / `_build_zatraty_formula`).
+Коэффициент кабинета берётся динамически из строки 1 (`AR1:EZ1`, тот же диапазон)
+над его именем: число → множитель, пусто/символ → 1 (см. `_parse_coeff` /
+`_build_zatraty_formula`).
 """
 from __future__ import annotations
 
@@ -72,8 +75,13 @@ ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC",)
 
 # Шапка кабинетов: имена — в строке 2 (матчинг spent), коэффициенты (НДС/комиссии)
 # — в строке 1 над именем. Оба диапазона читаются с одинаковым сдвигом от AR.
-CABINET_HEADER_RANGE = "AR2:EZ2"
-CABINET_COEFF_RANGE  = "AR1:EZ1"
+# EZ — верхняя граница «с запасом» (под будущий рост числа кабинетов), но лист
+# конкретного месяца может быть уже неё: Google Sheets не даст прочитать
+# диапазон, выходящий за пределы физической сетки листа. Поэтому фактический
+# диапазон в _cabinet_ranges() всегда обрезается по ws.col_count — раздувать
+# лист пустыми столбцами под эту константу не нужно.
+CABINET_START_COL = "AR"
+CABINET_MAX_COL    = "EZ"
 
 TARGET_GOAL_FOR_ZAYAVKI = "Zayvka"
 
@@ -110,6 +118,22 @@ def _col_index(letter: str) -> int:
     for c in letter.upper():
         n = n * 26 + (ord(c) - ord("A") + 1)
     return n
+
+
+def _cabinet_ranges(ws: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Диапазоны шапки/коэффициентов кабинетов (строки 2/1), обрезанные по
+    реальной ширине листа — CABINET_MAX_COL это лишь запас на будущее, а не
+    требование физически иметь столько столбцов на листе.
+
+    Если лист не дотягивает даже до CABINET_START_COL, кабинетов для этого
+    месяца ещё нет вообще — возвращаем (None, None).
+    """
+    start_idx = _col_index(CABINET_START_COL)
+    end_idx = min(_col_index(CABINET_MAX_COL), ws.col_count)
+    if end_idx < start_idx:
+        return None, None
+    end_col = _col_letter(end_idx)
+    return f"{CABINET_START_COL}2:{end_col}2", f"{CABINET_START_COL}1:{end_col}1"
 
 
 def _find_header_column(headers: Dict[str, str], report_name: str) -> Optional[str]:
@@ -465,17 +489,27 @@ def write_daily_report(
 
     # --- Шапка кабинетов (строка 2) + коэффициенты «Затрат» (строка 1) ---
     # Читаем ДО сборки batch: D-формула ниже строится из coeffs_map.
-    header_row = ws.get(CABINET_HEADER_RANGE)  # [[имя1, имя2, ...]]
-    header_cells: List[str] = header_row[0] if header_row else []
-    try:
-        coeff_row = ws.get(CABINET_COEFF_RANGE, value_render_option="UNFORMATTED_VALUE")
-    except TypeError:  # старый gspread без kwarg'а
-        coeff_row = ws.get(CABINET_COEFF_RANGE)
-    coeff_cells: List[Any] = coeff_row[0] if coeff_row else []
+    header_range, coeff_range = _cabinet_ranges(ws)
+    header_cells: List[str] = []
+    coeff_cells: List[Any] = []
+    if header_range is None:
+        logger.warning(
+            "Sheets/%s: на листе всего %d столбцов — колонка %s ещё не создана, "
+            "кабинеты в этом месяце не будут сматчены",
+            title, ws.col_count, CABINET_START_COL,
+        )
+    else:
+        header_row = ws.get(header_range)  # [[имя1, имя2, ...]]
+        header_cells = header_row[0] if header_row else []
+        try:
+            coeff_row = ws.get(coeff_range, value_render_option="UNFORMATTED_VALUE")
+        except TypeError:  # старый gspread без kwarg'а
+            coeff_row = ws.get(coeff_range)
+        coeff_cells = coeff_row[0] if coeff_row else []
 
     headers_map: Dict[str, str] = {}
     coeffs_map: Dict[str, float] = {}
-    start_col_idx = _col_index("AR")
+    start_col_idx = _col_index(CABINET_START_COL)
     for offset, cell in enumerate(header_cells):
         norm = _norm(cell)
         if not norm:
