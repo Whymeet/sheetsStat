@@ -7,11 +7,9 @@ LeadsTech — отдельный внешний сервис, логин/пар�
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from datetime import date
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ads_manager_client import AdsManagerClient, AdsManagerConfig
@@ -379,19 +377,15 @@ def collect_leadstech(config: Dict[str, Any], day: date, sub1: str) -> Dict[str,
     return result
 
 
-_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
-
-
 def _save_eightconnect_raw(day: date, raw_rows: List[Dict[str, Any]]) -> None:
-    """Кладём сырой ответ 8connect в output/8connect_{date}.json для дебага."""
+    """Кладём сырой ответ 8connect в БД (eightconnect_raw) для дебага.
+
+    Перезаписывается последним прогоном любого бренда за дату (как раньше файл).
+    """
     try:
-        _OUTPUT_DIR.mkdir(exist_ok=True)
-        path = _OUTPUT_DIR / f"8connect_{day.isoformat()}.json"
-        path.write_text(
-            json.dumps(raw_rows, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        logger.info("8connect: сырой ответ сохранён в %s", path)
+        import db
+        db.save_eightconnect_raw(day.isoformat(), raw_rows)
+        logger.info("8connect: сырой ответ сохранён в БД (date=%s)", day.isoformat())
     except Exception as e:
         logger.warning("8connect: не удалось сохранить сырой ответ: %s", e)
 
@@ -463,13 +457,36 @@ def collect_eightconnect(config: Dict[str, Any], day: date) -> Dict[str, Any]:
     }
 
 
-def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]:
-    """Полный отчёт за день: VK (Ads Manager) + Yandex Direct + LeadsTech + 8connect."""
+class ReportCancelled(Exception):
+    """Прогон отменён пользователем между стадиями сборки (ничего не записано)."""
+
+
+def build_report(
+    config: Dict[str, Any],
+    day: date,
+    sub1: str,
+    cancel_check=None,
+) -> Dict[str, Any]:
+    """Полный отчёт за день: VK (Ads Manager) + Yandex Direct + LeadsTech + 8connect.
+
+    `cancel_check` — колбэк без аргументов, бросающий ReportCancelled;
+    вызывается между стадиями (каждая — сетевые секунды), до любых записей.
+    """
+    def _check() -> None:
+        if cancel_check is not None:
+            cancel_check()
+
+    _check()
     ads_manager = collect_ads_manager(config, day, label=sub1)
+    _check()
     yandex = collect_yandex(config, day)
+    _check()
     yandex_metrika = collect_yandex_metrika(config, day)
+    _check()
     leadstech = collect_leadstech(config, day, sub1)
+    _check()
     eightconnect = collect_eightconnect(config, day)
+    _check()
 
     result: Dict[str, Any] = {
         "date": day.isoformat(),
@@ -484,9 +501,55 @@ def build_report(config: Dict[str, Any], day: date, sub1: str) -> Dict[str, Any]
         "eightconnect": eightconnect,
     }
 
+    # Последняя точка отмены — до открытия листа и любых записей.
+    _check()
+
+    # Контекст листа открывается ДО вычисления метрик: из него читаются
+    # ручные значения (R «Долеты и Крот», кабинетные AVITO/Google).
+    ctx = None
+    try:
+        from sheets_writer import (
+            compute_cabinet_spend, extract_manual_values, open_sheet_context,
+            zayavki_value,
+        )
+        ctx = open_sheet_context(config, day)
+    except Exception as e:
+        logger.error("Sheets: не удалось открыть контекст листа: %s", e, exc_info=True)
+
+    # Семантические метрики: бэкенд считает все формулы таблицы сам.
+    # Ошибка расчёта не валит отчёт (конвенция collect_*).
+    try:
+        import metrics as metrics_mod
+        from sheets_writer import (  # noqa: F811 — если импорт выше упал
+            compute_cabinet_spend, extract_manual_values, zayavki_value,
+        )
+        from sheets_writer import manual_cabinet_entries
+        manual_values = extract_manual_values(ctx, config)
+        spend, coeff_warnings, manual_cab_values = compute_cabinet_spend(ctx, config, result)
+        income_labels = {e["label"] for e in
+                         manual_cabinet_entries(config.get("google_sheets") or {})
+                         if e["target"] == "prihod"}
+        manual_income = sum(v for lbl, v in manual_cab_values.items()
+                            if lbl in income_labels and v is not None)
+        from sheets_writer import disabled_metrics
+        values, meta = metrics_mod.compute_metrics(
+            result, float(zayavki_value(config, result)), spend, manual_values,
+            manual_income=manual_income,
+            disabled=disabled_metrics(config.get("google_sheets") or {}),
+        )
+        meta["manual_values"] = manual_values
+        meta["manual_cabinets"] = manual_cab_values
+        if coeff_warnings:
+            meta["coeff_warnings"] = coeff_warnings
+        result["metrics"] = values
+        result["metrics_meta"] = meta
+    except Exception as e:
+        logger.error("metrics: расчёт метрик упал: %s", e, exc_info=True)
+        result["metrics_meta"] = {"error": f"{type(e).__name__}: {e}"}
+
     # Запись в Google Sheets (опционально, под флагом google_sheets.enabled)
     try:
-        gs_summary = write_daily_report(config, day, result)
+        gs_summary = write_daily_report(config, day, result, context=ctx)
         if gs_summary:
             result["google_sheets"] = gs_summary
     except Exception as e:

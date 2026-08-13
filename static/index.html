@@ -31,6 +31,7 @@
         <button class="tab-btn active" data-tab="overview">Обзор</button>
         <button class="tab-btn" data-tab="report">Отчёт</button>
         <button class="tab-btn" data-tab="settings">Настройки</button>
+        <button class="tab-btn" data-tab="columns">Метрики</button>
         <button class="tab-btn" data-tab="history">История</button>
       </nav>
       <div class="active-brand" id="active-brand-label"></div>
@@ -107,73 +108,94 @@
           <p id="report-status" class="status"></p>
 
           <div id="range-progress" class="hidden">
-            <p id="range-status" class="status"></p>
-            <div id="range-log" class="range-log"></div>
+            <div class="progress-head">
+              <div class="progress-track"><div id="range-bar" class="progress-fill"></div></div>
+              <span id="range-counter" class="progress-counter">0 / 0</span>
+              <button id="range-cancel" class="danger sm" type="button">Отменить</button>
+            </div>
+            <p id="range-status" class="status" style="margin: 6px 0 4px 0;"></p>
+            <div class="table-wrap">
+              <table id="range-days" class="ruled">
+                <thead><tr><th>Дата</th><th>Статус</th><th>Sheets</th><th style="width:30px;">⚠</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
           </div>
         </div>
 
         <div id="report-result" class="card hidden">
           <h2>Результат</h2>
-          <div id="report-summary"></div>
-          <div id="report-gs" class="status" style="margin-bottom:8px;"></div>
+          <div id="report-head" class="report-head"></div>
+          <div id="report-warnings" style="margin-bottom: 8px;"></div>
+          <div id="report-metrics"></div>
 
-          <h3>Ads Manager</h3>
-          <table id="cabinets-table">
-            <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
-            <tbody></tbody>
-            <tfoot><tr><th>Total</th><th class="num" id="ads-total">—</th></tr></tfoot>
-          </table>
+          <details class="src" id="sec-ads">
+            <summary>Ads Manager <span class="sec-info" id="ads-info"></span></summary>
+            <table id="cabinets-table" class="ruled">
+              <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
+              <tbody></tbody>
+              <tfoot><tr><th>Total</th><th class="num" id="ads-total">—</th></tr></tfoot>
+            </table>
+          </details>
 
-          <h3>Yandex Direct (с НДС)</h3>
-          <table id="yandex-table">
-            <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
-            <tbody></tbody>
-            <tfoot><tr><th>Total</th><th class="num" id="yandex-total">—</th></tr></tfoot>
-          </table>
+          <details class="src" id="sec-yx">
+            <summary>Yandex Direct (с НДС) <span class="sec-info" id="yx-info"></span></summary>
+            <table id="yandex-table" class="ruled">
+              <thead><tr><th>Кабинет</th><th class="num">Spent</th></tr></thead>
+              <tbody></tbody>
+              <tfoot><tr><th>Total</th><th class="num" id="yandex-total">—</th></tr></tfoot>
+            </table>
+          </details>
 
-          <h3>Yandex Metrika</h3>
-          <table id="metrika-totals-table">
-            <tbody>
-              <tr><th>Визиты</th><td class="num" id="ym-visits-total">—</td></tr>
-              <tr><th>Просмотры</th><td class="num" id="ym-pageviews-total">—</td></tr>
-              <tr><th>Посетители</th><td class="num" id="ym-users-total">—</td></tr>
-            </tbody>
-          </table>
-          <table id="metrika-table">
-            <thead>
-              <tr><th>Цель</th><th class="num">Достижения</th><th class="num">Целевые визиты</th><th class="num">CR, %</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+          <details class="src" id="sec-ym">
+            <summary>Yandex Metrika <span class="sec-info" id="ym-info"></span></summary>
+            <table id="metrika-totals-table" class="ruled">
+              <tbody>
+                <tr><th>Визиты</th><td class="num" id="ym-visits-total">—</td></tr>
+                <tr><th>Просмотры</th><td class="num" id="ym-pageviews-total">—</td></tr>
+                <tr><th>Посетители</th><td class="num" id="ym-users-total">—</td></tr>
+              </tbody>
+            </table>
+            <table id="metrika-table" class="ruled">
+              <thead>
+                <tr><th>Цель</th><th class="num">Достижения</th><th class="num">Целевые визиты</th><th class="num">CR, %</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </details>
 
-          <h3>LeadsTech</h3>
-          <table id="leadstech-table">
-            <tbody>
-              <tr><th>Клики (uniques)</th><td class="num" id="lt-clicks">—</td></tr>
-              <tr><th>Хосты</th><td class="num" id="lt-hosts">—</td></tr>
-              <tr><th>Сумма (sumwebmaster)</th><td class="num" id="lt-sum">—</td></tr>
-              <tr><th>Конверсии / approved / rejected</th><td class="num" id="lt-conv">—</td></tr>
-            </tbody>
-          </table>
-          <table id="leadstech-accounts-table" style="display:none;">
-            <thead>
-              <tr><th>Аккаунт</th><th>sub1</th><th class="num">Клики</th><th class="num">Хосты</th><th class="num">Сумма</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-          <div id="lt-error" class="status err" style="margin-top:4px;"></div>
+          <details class="src" id="sec-lt">
+            <summary>LeadsTech <span class="sec-info" id="lt-info"></span></summary>
+            <table id="leadstech-table" class="ruled">
+              <tbody>
+                <tr><th>Клики (uniques)</th><td class="num" id="lt-clicks">—</td></tr>
+                <tr><th>Хосты</th><td class="num" id="lt-hosts">—</td></tr>
+                <tr><th>Сумма (sumwebmaster)</th><td class="num" id="lt-sum">—</td></tr>
+                <tr><th>Конверсии / approved / rejected</th><td class="num" id="lt-conv">—</td></tr>
+              </tbody>
+            </table>
+            <table id="leadstech-accounts-table" class="ruled" style="display:none;">
+              <thead>
+                <tr><th>Аккаунт</th><th>sub1</th><th class="num">Клики</th><th class="num">Хосты</th><th class="num">Сумма</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div id="lt-error" class="status err" style="margin-top:4px;"></div>
+          </details>
 
-          <h3>8connect</h3>
-          <table id="eightconnect-table">
-            <tbody>
-              <tr><th>Расход (→ AC)</th><td class="num" id="ec-cost">—</td></tr>
-              <tr><th>Доход (→ AE)</th><td class="num" id="ec-charge">—</td></tr>
-              <tr><th>Scheme IDs</th><td class="num" id="ec-scheme-list">—</td></tr>
-            </tbody>
-          </table>
-          <div id="ec-error" class="status err" style="margin-top:4px;"></div>
+          <details class="src" id="sec-ec">
+            <summary>8connect <span class="sec-info" id="ec-info"></span></summary>
+            <table id="eightconnect-table" class="ruled">
+              <tbody>
+                <tr><th>Расход (→ AC)</th><td class="num" id="ec-cost">—</td></tr>
+                <tr><th>Доход (→ AE)</th><td class="num" id="ec-charge">—</td></tr>
+                <tr><th>Scheme IDs</th><td class="num" id="ec-scheme-list">—</td></tr>
+              </tbody>
+            </table>
+            <div id="ec-error" class="status err" style="margin-top:4px;"></div>
+          </details>
 
-          <details>
+          <details class="src">
             <summary>Сырой JSON</summary>
             <pre id="report-raw"></pre>
           </details>
@@ -344,11 +366,11 @@
         <div class="card">
           <h2>Google Sheets</h2>
           <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
-            Запись отчёта в таблицу: фикс. ячейки C/E/F/G/AI по строке даты,
-            расходы кабинетов — в колонки по названию из <code>AR2:CL2</code>,
-            остаток — в <code>A37↓/B37↓</code>. Вкладка выбирается по месяцу
-            («Апрель 26»). Раскладка одинаковая у всех брендов — у нового бренда
-            таблица должна быть копией шаблона.
+            Запись отчёта в таблицу: метрики находят свои колонки <b>по подписям
+            строки 2</b> (редактируются во вкладке «Колонки»), расходы кабинетов —
+            по названию кабинета в шапке от <code>AR2</code>. Вкладка выбирается
+            по месяцу («Апрель 26»). У нового бренда таблица должна быть копией
+            шаблона.
           </p>
           <div class="grid two">
             <label style="grid-column: 1 / -1;">Ссылка на таблицу или Spreadsheet ID
@@ -359,12 +381,66 @@
             <label style="display:flex; align-items:center; gap:8px; text-transform:none;">
               <input type="checkbox" id="gs-enabled"> Включить запись в Sheets
             </label>
+            <div style="grid-column: 1 / -1; display:flex; align-items:center; gap:8px;">
+              <button id="gs-create" class="secondary" type="button">Создать / разметить таблицу</button>
+              <span id="gs-create-status" class="status" style="margin:0;"></span>
+            </div>
           </div>
         </div>
 
-        <div class="card">
+        <div class="save-bar">
           <button id="save-config" class="primary">Сохранить настройки</button>
           <span id="save-status" class="status"></span>
+        </div>
+      </section>
+
+      <!-- TAB: COLUMNS (подписи колонок Sheets выбранного бренда) -->
+      <section id="tab-columns" class="tab">
+        <div class="card">
+          <h2>Метрики: <span id="columns-profile-name">—</span></h2>
+          <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
+            У каждой метрики два независимых имени. <b>Подпись колонки</b> — по ней колонка
+            ищется на листе при записи: переименовал в таблице → поменяй здесь.
+            <b>Название в системе</b> — как метрика зовётся в отчётах и формулах этой проги;
+            на таблицу не влияет. Пустое поле — стандартное значение, изменённые подсвечены
+            цветом. Формулы правятся в коде (metrics.py).
+          </p>
+          <div class="grid two" style="margin-bottom:4px;">
+            <label>Область кабинетов: с колонки
+              <input type="text" id="gs-cab-start" placeholder="AR" style="text-transform:uppercase;">
+            </label>
+            <label>Область кабинетов: по колонку
+              <input type="text" id="gs-cab-end" placeholder="EZ" style="text-transform:uppercase;">
+            </label>
+            <small style="grid-column: 1 / -1; color: var(--muted); font-size: 12px;">
+              Расходы кабинетов на листе: имена — строка 2, коэффициенты — строка 1.
+              Пусто = AR..EZ. Левее AN сдвинуть нельзя — там метрики из таблицы выше.
+            </small>
+          </div>
+          <p id="columns-status" class="status" style="margin-left:0;"></p>
+          <div class="table-wrap">
+            <table id="columns-table">
+              <thead>
+                <tr>
+                  <th class="zone-head" colspan="2">Таблица Google</th>
+                  <th class="zone-head zone-split" colspan="4">Система</th>
+                </tr>
+                <tr>
+                  <th style="width:40px;">Кол</th>
+                  <th>Подпись колонки (строка 2)</th>
+                  <th class="zone-split">Название в системе</th>
+                  <th style="width:80px;">Тип</th>
+                  <th>Формула / источник</th>
+                  <th>Описание</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="save-bar">
+            <button id="columns-save" class="primary" type="button">Сохранить</button>
+            <span id="columns-save-status" class="status"></span>
+          </div>
         </div>
       </section>
 
@@ -379,7 +455,7 @@
             </div>
           </div>
           <table id="history-table">
-            <thead><tr><th>Файл</th><th>Размер</th><th>Время</th><th></th></tr></thead>
+            <thead><tr><th>Бренд</th><th>Дата</th><th>sub1</th><th>Статус</th><th>Завершён</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
           <pre id="history-preview" class="hidden"></pre>

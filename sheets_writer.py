@@ -1,35 +1,49 @@
 """Запись дневного отчёта build_report в Google Sheets.
 
 Таблица — «Копия kubyshka-zaim.ru». На каждый месяц — отдельная вкладка
-(«Апрель 26», «Май 26», …). Столбец A — даты `dd.mm.yyyy`.
+(«Апрель 26», «Май 26», …). Столбец A — даты `dd.mm.yyyy` (жёстко: дата —
+первичный ключ строки и последний позиционный якорь).
 
-На строке даты пишем агрегаты в фиксированных колонках:
-    C  — Приход            = формула `=AE{row}+AJ{row}+AF{row}+R{row}`
-    E  — Клики ЛТ          = leadstech.clicks
-    F  — Метрика визиты    = yandex_metrika.visits
-    G  — Заявки с сайта    = Достижения/Целевые визиты цели бренда
-                             (yandex_metrika.zayavki_metric: reaches|visits)
-    AB — 8connect SMS      = eightconnect.count (кол-во отправленных SMS)
-    AC — 8connect cost     = eightconnect.cost
-    AE — 8connect charge   = eightconnect.charge
-    AF — Клиенты           = всегда 0 (по требованию)
-    AI — Переходы уники    = leadstech.hosts
-    AJ — Доход с витрины   = формула `={leadstech.sum}-AE{row}` (sumwebmaster − 8connect charge)
+Агрегатные колонки НЕ захардкожены буквами: перед записью читается шапка
+строки 2 и каждая метрика находится по своей подписи (реестр `AGG_COLUMNS`,
+у каждой метрики — каноническая подпись + номер вхождения для дублей вроде
+«Приход», который есть и в C, и в блоке СМС). Нестандартные подписи бренда
+переопределяются в конфиге: `google_sheets.column_labels: {key: "подпись"}`.
+
+Метрики реестра (легаси-раскладка в скобках — только исторический default):
+    prihod        (C)  — формула `=<sms_charge>+<dohod_vitrina>+<sms_clients>+<dolety>`
+    zatraty       (D)  — формула Σ(расход_i * коэф_i) + <sms_cost>
+    clicks_lt     (E)  — leadstech.clicks
+    metrika_v     (F)  — yandex_metrika.visits
+    zayavki       (G)  — Достижения/Целевые визиты цели бренда
+                         (yandex_metrika.zayavki_metric: reaches|visits)
+    dolety        (R)  — не пишется, только операнд формулы prihod
+    sms_count     (AB) — eightconnect.count (кол-во отправленных SMS)
+    sms_cost      (AC) — eightconnect.cost
+    sms_charge    (AE) — eightconnect.charge
+    sms_clients   (AF) — всегда 0 (по требованию)
+    perehody      (AI) — leadstech.hosts
+    dohod_vitrina (AJ) — формула `={leadstech.sum}-<sms_charge>`
+
+Политика промаха — strict: подпись не нашлась → метрика НЕ пишется (warning
+в сводке `header_warnings`, ячейку заполнит шаблонная формула строки 33, если
+она там есть); формула с неразрешённым операндом не пишется целиком (молча
+выкинуть слагаемое = тихо исказить числа). Если не разрешилась НИ ОДНА подпись
+(шапка пустая/не прочиталась — сломанный лист, а не «подвинули колонку») —
+полный фолбэк на легаси-буквы реестра.
 
 Поля `leadstech.*` — это сумма по всем аккаунтам LeadsTech бренда
 (`leadstech.accounts[]` в конфиге); разбивка лежит в `leadstech.accounts` отчёта
 и в таблицу не пишется.
 
-В строке 2 (`AR2:EZ2`, обрезано по реальной ширине листа — см. `_cabinet_ranges`)
-лежат названия рекламных кабинетов. По каждому spent'у из отчёта ищем свою
+Кабинетная зона — от CABINET_START_COL (AR, фиксированная граница: определять
+её динамически ненадёжно, у брендов разметка строки 1 различается). В строке 2
+лежат названия рекламных кабинетов: по каждому spent'у из отчёта ищем свою
 колонку и пишем spent в `{col}{date_row}`. Кабинеты, которых нет в шапке (в т.ч.
-из-за того, что лист физически уже EZ), в таблицу не пишутся — видны в JSON-отчёте
-и в счётчике `unmatched`.
-
-    D  — Затраты           = формула Σ(расход_i * коэф_i) + AC (8connect).
-Коэффициент кабинета берётся динамически из строки 1 (`AR1:EZ1`, тот же диапазон)
-над его именем: число → множитель, пусто/символ → 1 (см. `_parse_coeff` /
-`_build_zatraty_formula`).
+из-за того, что лист физически уже EZ), в таблицу не пишутся — видны в
+JSON-отчёте и в счётчике `unmatched`. Коэффициент кабинета для формулы «Затрат»
+берётся из строки 1 над его именем: число → множитель, пусто/символ → 1
+(см. `_parse_coeff` / `_build_zatraty_formula`).
 """
 from __future__ import annotations
 
@@ -37,6 +51,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,39 +64,80 @@ RU_MONTHS = [
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
 
-COL_PRIHOD         = "C"
-COL_ZATRATY        = "D"
-COL_CLICKS_LT      = "E"
-COL_METRIKA_V      = "F"
-COL_ZAYAVKI        = "G"
-COL_PEREHODY       = "AI"
-COL_DOHOD_VITRINA  = "AJ"
+# Реестр агрегатных метрик: key -> (каноническая подпись строки 2,
+# номер вхождения слева направо (1-based, для дублей подписей),
+# легаси-буква — используется ТОЛЬКО при полном фолбэке, когда не разрешилась
+# ни одна подпись). Подпись метрики можно переопределить per-brand через
+# конфиг `google_sheets.column_labels: {key: "подпись"}` (вхождение тогда 1).
+AGG_COLUMNS: Dict[str, Tuple[str, int, str]] = {
+    "prihod":        ("Приход",          1, "C"),   # формула
+    "zatraty":       ("Затраты",         1, "D"),   # формула
+    "clicks_lt":     ("Клики лт",        1, "E"),
+    "metrika_v":     ("Метрика визиты",  1, "F"),
+    "zayavki":       ("Заявки с сайта",  1, "G"),
+    "dolety":        ("Долеты и Крот",   1, "R"),   # только операнд формулы prihod
+    "sms_count":     ("кол-во смсок",    1, "AB"),
+    "sms_cost":      ("Расход",          1, "AC"),
+    "sms_charge":    ("Приход",          2, "AE"),  # дубль «Приход» — 2-е вхождение (блок СМС)
+    "sms_clients":   ("Клиенты",         1, "AF"),  # пишется литерал 0
+    "perehody":      ("Переходы Уники",  1, "AI"),
+    "dohod_vitrina": ("Доход с витрины", 1, "AJ"),  # формула
+}
 
-# 8connect: расход пишем в AC (уже слагаемое формулы D без коэффициента),
-# доход/приход — в AE. AC входит в ZATRATY_PLAIN_COLS ниже, так что формула
-# в D автоматически подхватит расход 8connect.
-# AB — кол-во отправленных SMS (count), AF — кол-во клиентов (client).
-COL_8CONN_COST    = "AC"
-COL_8CONN_CHARGE  = "AE"
-COL_8CONN_COUNT   = "AB"
-COL_8CONN_CLIENTS = "AF"
+# Семантика метрик — что именно пишется в колонку. Показывается во вкладке
+# «Колонки» UI рядом с редактируемой подписью (GET /api/sheets/columns).
+AGG_COLUMN_DESCRIPTIONS: Dict[str, str] = {
+    "prihod":        "Формула: Приход СМС + Доход с витрины + Клиенты + Долеты",
+    "zatraty":       "Формула: Расход СМС + Σ(кабинет × коэффициент из строки 1)",
+    "clicks_lt":     "LeadsTech: уники (uniques) по sub1, сумма по всем аккаунтам",
+    "metrika_v":     "Яндекс.Метрика: визиты счётчика за день",
+    "zayavki":       "Яндекс.Метрика: число цели «Zayvka» (или первой цели бренда)",
+    "dolety":        "Ведётся руками, мы не пишем — только операнд формулы «Приход»",
+    "sms_count":     "8connect: количество отправленных SMS (count)",
+    "sms_cost":      "8connect: расход на рассылку (cost)",
+    "sms_charge":    "8connect: доход с рассылки (charge)",
+    "sms_clients":   "Всегда пишется 0 (по требованию)",
+    "perehody":      "LeadsTech: уникальные хосты (hosts) по sub1",
+    "dohod_vitrina": "Формула: доход вебмастера LeadsTech (sumwebmaster) − Приход СМС",
+}
 
 # «Всегда-плоские» слагаемые формулы «Затраты» (множитель 1) вне диапазона
-# кабинетов: AC — расход 8connect (лежит до AR). Коэффициенты остальных колонок
-# больше не хардкодятся, а читаются динамически из строки 1 листа над именем
-# кабинета (см. CABINET_COEFF_RANGE / _parse_coeff): число → множитель, пусто/
-# символ → 1.
-ZATRATY_PLAIN_COLS: Tuple[str, ...] = ("AC",)
+# кабинетов: расход 8connect (лежит до AR). Коэффициенты кабинетных колонок
+# читаются динамически из строки 1 листа над именем кабинета
+# (см. _parse_coeff): число → множитель, пусто/символ → 1.
+ZATRATY_PLAIN_KEYS: Tuple[str, ...] = ("sms_cost",)
 
-# Шапка кабинетов: имена — в строке 2 (матчинг spent), коэффициенты (НДС/комиссии)
-# — в строке 1 над именем. Оба диапазона читаются с одинаковым сдвигом от AR.
+# Граница кабинетной зоны: имена кабинетов — в строке 2 от AR, коэффициенты
+# (НДС/комиссии) — в строке 1 над именем. Левее AR — агрегатная зона (подписи
+# метрик AGG_COLUMNS). Граница фиксированная: определять её динамически по
+# строке 1 ненадёжно (разметка у брендов различается).
 # EZ — верхняя граница «с запасом» (под будущий рост числа кабинетов), но лист
 # конкретного месяца может быть уже неё: Google Sheets не даст прочитать
-# диапазон, выходящий за пределы физической сетки листа. Поэтому фактический
-# диапазон в _cabinet_ranges() всегда обрезается по ws.col_count — раздувать
+# диапазон, выходящий за пределы физической сетки листа. Поэтому диапазон
+# чтения шапки в _read_header() всегда обрезается по ws.col_count — раздувать
 # лист пустыми столбцами под эту константу не нужно.
 CABINET_START_COL = "AR"
 CABINET_MAX_COL    = "EZ"
+
+
+def cabinet_bounds(config_or_gs: Dict[str, Any]) -> Tuple[int, int]:
+    """(start_idx, max_idx) кабинетной зоны бренда.
+
+    Область редактируется в конфиге: `google_sheets.cabinet_start_col` /
+    `cabinet_max_col` (дефолт AR..EZ). Начало не может залезать в агрегатную
+    зону (подписи метрик A..AM + служебные AN..AQ): всё левее AN молча
+    поднимается до AN — иначе агрегатные колонки посчитались бы кабинетами.
+    """
+    gs = config_or_gs.get("google_sheets", config_or_gs) or {}
+
+    def _parse(v: Any, default: str) -> int:
+        s = str(v or "").strip().upper()
+        return _col_index(s) if s and s.isalpha() else _col_index(default)
+
+    start = max(_parse(gs.get("cabinet_start_col"), CABINET_START_COL),
+                _col_index("AN"))
+    end = _parse(gs.get("cabinet_max_col"), CABINET_MAX_COL)
+    return start, max(end, start)
 
 TARGET_GOAL_FOR_ZAYAVKI = "Zayvka"
 
@@ -91,8 +147,10 @@ TEMPLATE_ROW = 33
 _TEMPLATE_RANGE = f"A{TEMPLATE_ROW}:ZZ{TEMPLATE_ROW}"
 # \b нужен, чтобы 33 не цеплялось посреди 330/133, но срабатывало на AR33 / AR$33.
 _TEMPLATE_ROW_RE = re.compile(rf"(\$?[A-Z]+\$?){TEMPLATE_ROW}\b")
-# Кэш формул по title вкладки — один раз на процесс.
-_TEMPLATE_CACHE: Dict[str, Dict[str, str]] = {}
+# Кэш формул по (spreadsheet_id, title вкладки) — один раз на процесс.
+# spreadsheet_id в ключе обязателен: процесс обслуживает все бренды, а title
+# вида «Август 26» одинаков во всех таблицах.
+_TEMPLATE_CACHE: Dict[Tuple[str, str], Dict[str, str]] = {}
 
 _WS_SPACE_RE = re.compile(r"\s+")
 
@@ -120,20 +178,95 @@ def _col_index(letter: str) -> int:
     return n
 
 
-def _cabinet_ranges(ws: Any) -> Tuple[Optional[str], Optional[str]]:
-    """Диапазоны шапки/коэффициентов кабинетов (строки 2/1), обрезанные по
-    реальной ширине листа — CABINET_MAX_COL это лишь запас на будущее, а не
-    требование физически иметь столько столбцов на листе.
+def _read_header(ws: Any, max_idx: Optional[int] = None) -> Tuple[List[Any], List[str]]:
+    """Читает шапку листа одним запросом: `A1:{end}2`, где end обрезан по
+    реальной ширине листа (CABINET_MAX_COL — лишь запас на будущее).
 
-    Если лист не дотягивает даже до CABINET_START_COL, кабинетов для этого
-    месяца ещё нет вообще — возвращаем (None, None).
+    Возвращает `(coeff_row, label_row)`: строка 1 (коэффициенты «Затрат» над
+    кабинетами) и строка 2 (подписи агрегатных колонок + имена кабинетов).
+    Индекс в списке = номер колонки − 1; короткие/пустые строки паддятся,
+    т.к. Sheets возвращает их укороченными (в т.ч. из-за merged-ячеек).
+
+    Рендер — UNFORMATTED_VALUE: коэффициенты приходят точными числами
+    (формат ячейки округляет: 1.048 показывается как «1,05»), а текстовые
+    подписи в этом рендере не меняются.
+
+    Не кэшируется: свежая шапка на каждый прогон — это и есть смысл
+    динамической привязки (колонки двигают между запусками).
     """
-    start_idx = _col_index(CABINET_START_COL)
-    end_idx = min(_col_index(CABINET_MAX_COL), ws.col_count)
-    if end_idx < start_idx:
-        return None, None
-    end_col = _col_letter(end_idx)
-    return f"{CABINET_START_COL}2:{end_col}2", f"{CABINET_START_COL}1:{end_col}1"
+    end_idx = min(max_idx or _col_index(CABINET_MAX_COL), ws.col_count)
+    rng = f"A1:{_col_letter(end_idx)}2"
+    try:
+        rows = ws.get(rng, value_render_option="UNFORMATTED_VALUE")
+    except TypeError:  # старый gspread без kwarg'а
+        rows = ws.get(rng)
+    rows = list(rows or [])
+    while len(rows) < 2:
+        rows.append([])
+    return rows[0], rows[1]
+
+
+def _resolve_agg_columns(
+    label_row: List[Any],
+    labels_override: Dict[str, str],
+    cabinet_start_idx: Optional[int] = None,
+) -> Tuple[Dict[str, str], List[str]]:
+    """Находит букву колонки для каждой метрики AGG_COLUMNS по подписи в
+    строке 2. Возвращает `({key: буква}, [warning, ...])`.
+
+    Ищем только левее CABINET_START_COL — кабинет с именем «Приход» не должен
+    сбивать счёт вхождений. Промах подписи → key отсутствует в результате
+    (strict-политика — писать по старой букве опаснее, чем не писать).
+    Не разрешился ни один key → полный фолбэк на легаси-буквы реестра
+    (шапка пустая/не прочиталась — это сломанный лист, а не сдвиг колонок).
+    """
+    if cabinet_start_idx is None:
+        cabinet_start_idx = _col_index(CABINET_START_COL)
+    by_label: Dict[str, List[str]] = {}
+    for offset, cell in enumerate(label_row):
+        if offset + 1 >= cabinet_start_idx:
+            break
+        norm = _norm(str(cell))
+        if norm:
+            by_label.setdefault(norm, []).append(_col_letter(offset + 1))
+
+    cols: Dict[str, str] = {}
+    warnings: List[str] = []
+    for key, (label, occurrence, _legacy) in AGG_COLUMNS.items():
+        override = (labels_override or {}).get(key)
+        if override:
+            label, occurrence = override, 1
+        hits = by_label.get(_norm(label), [])
+        if len(hits) >= occurrence:
+            cols[key] = hits[occurrence - 1]
+        else:
+            warnings.append(
+                f"подпись {label!r}"
+                + (f" (вхождение {occurrence})" if occurrence > 1 else "")
+                + f" не найдена в строке 2 — метрика {key} не записана"
+            )
+
+    # Sanity поверх порядкового номера: «Приход» блока СМС обязан быть правее
+    # «Расхода». Если нет — кто-то вставил ещё один «Приход» между дублями,
+    # порядковый счёт сбился, доверять sms_charge нельзя.
+    if "sms_charge" in cols and "sms_cost" in cols:
+        if _col_index(cols["sms_charge"]) <= _col_index(cols["sms_cost"]):
+            warnings.append(
+                f"колонка sms_charge ({cols['sms_charge']}) левее sms_cost "
+                f"({cols['sms_cost']}) — похоже, появился лишний дубль подписи; "
+                "метрика sms_charge не записана"
+            )
+            del cols["sms_charge"]
+
+    if not cols:
+        warnings = [
+            "ни одна подпись агрегатных колонок не найдена в строке 2 — "
+            "полный фолбэк на легаси-раскладку "
+            + ", ".join(f"{k}={v[2]}" for k, v in AGG_COLUMNS.items())
+        ]
+        cols = {key: legacy for key, (_l, _o, legacy) in AGG_COLUMNS.items()}
+
+    return cols, warnings
 
 
 def _find_header_column(headers: Dict[str, str], report_name: str) -> Optional[str]:
@@ -234,13 +367,14 @@ def _collect_cabinets(report: Dict[str, Any]) -> List[Tuple[str, float, str]]:
     return out
 
 
-def _load_template_formulas(ws: Any, title: str) -> Dict[str, str]:
+def _load_template_formulas(ws: Any, spreadsheet_id: str, title: str) -> Dict[str, str]:
     """Читает формулы из строки-эталона TEMPLATE_ROW вкладки.
 
     Возвращает `{col_letter: formula}` только для ячеек, начинающихся с `=`.
-    Результат кэшируется по title вкладки на всё время жизни процесса.
+    Результат кэшируется по (spreadsheet_id, title) на всё время жизни процесса.
     """
-    cached = _TEMPLATE_CACHE.get(title)
+    cache_key = (spreadsheet_id, title)
+    cached = _TEMPLATE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
@@ -260,7 +394,7 @@ def _load_template_formulas(ws: Any, title: str) -> Dict[str, str]:
         "Sheets/%s: шаблонных формул в строке %d — %d (%s)",
         title, TEMPLATE_ROW, len(template), ", ".join(sorted(template.keys())) or "—",
     )
-    _TEMPLATE_CACHE[title] = template
+    _TEMPLATE_CACHE[cache_key] = template
     return template
 
 
@@ -269,31 +403,45 @@ def _substitute_template_row(formula: str, target_row: int) -> str:
     return _TEMPLATE_ROW_RE.sub(rf"\g<1>{target_row}", formula)
 
 
-def _build_prihod_formula(row: int) -> str:
-    """Формула C: `=AE{row}+AJ{row}+AF{row}+R{row}`."""
-    return f"={COL_8CONN_CHARGE}{row}+{COL_DOHOD_VITRINA}{row}+AF{row}+R{row}"
+def _build_prihod_formula(row: int, cols: Dict[str, str],
+                          income_cols: Optional[List[str]] = None,
+                          skip: Optional[List[str]] = None) -> str:
+    """Формула «Приход»: `=<sms_charge>+<dohod_vitrina>+<sms_clients>+<dolety>`
+    (+ колонки доходных ручных полей; `skip` — колонки отключённых метрик).
+
+    Вызывающий код обязан проверить, что нужные операнды есть в `cols`.
+    """
+    parts = [cols["sms_charge"], cols["dohod_vitrina"], cols["sms_clients"]]
+    if "dolety" in cols:
+        parts.append(cols["dolety"])
+    parts = [c for c in parts if c not in set(skip or [])]
+    base = "=" + "+".join(f"{c}{row}" for c in parts)
+    for col in income_cols or []:
+        base += f"+{col}{row}"
+    return base
 
 
-def _build_dohod_vitrina_formula(row: int, sumwebmaster: float) -> str:
-    """Формула AJ: `={sumwebmaster}-AE{row}` (sumwebmaster − 8connect charge).
+def _build_dohod_vitrina_formula(row: int, sumwebmaster: float, cols: Dict[str, str]) -> str:
+    """Формула «Доход с витрины»: `={sumwebmaster}-<sms_charge>{row}`.
 
     Число форматируем с запятой — таблица в русской локали (USER_ENTERED).
     """
     literal = f"{sumwebmaster:.2f}".replace(".", ",")
-    return f"={literal}-{COL_8CONN_CHARGE}{row}"
+    return f"={literal}-{cols['sms_charge']}{row}"
 
 
-def _build_zatraty_formula(row: int, coeffs: Dict[str, float]) -> str:
+def _build_zatraty_formula(row: int, coeffs: Dict[str, float], plain_cols: List[str]) -> str:
     """Собирает формулу «Затрат» для заданной строки.
 
     `coeffs` — карта `колонка → множитель` по кабинетам с именем в строке 2
-    (коэффициент из строки 1 листа; пусто/символ → 1). ZATRATY_PLAIN_COLS
-    добавляются как есть (множитель 1), вне диапазона кабинетов.
+    (коэффициент из строки 1 листа; пусто/символ → 1). `plain_cols` —
+    разрешённые колонки ZATRATY_PLAIN_KEYS, добавляются как есть
+    (множитель 1), вне диапазона кабинетов.
 
     Формат коэффициента — с запятой в качестве десятичного разделителя,
     т.к. таблица в русской локали (USER_ENTERED парсит по локали).
     """
-    parts: List[str] = [f"{col}{row}" for col in ZATRATY_PLAIN_COLS]
+    parts: List[str] = [f"{col}{row}" for col in plain_cols]
     for col, k in coeffs.items():
         if k == 1:
             parts.append(f"{col}{row}")
@@ -410,14 +558,305 @@ def _build_gsheets_spreadsheet(config: Dict[str, Any]) -> Optional[Any]:
     return spreadsheet
 
 
+@dataclass
+class SheetContext:
+    """Открытый лист + прочитанная шапка + окно строки даты.
+
+    Открывается ДО вычисления метрик (build_report читает отсюда ручные
+    значения: R «Долеты и Крот», ручные кабинетные колонки AVITO/Google),
+    затем передаётся в write_daily_report — лист не открывается дважды.
+    """
+    enabled: bool = True
+    error: Optional[str] = None
+    spreadsheet: Any = None
+    spreadsheet_id: str = ""
+    ws: Any = None
+    title: str = ""
+    date_row: Optional[int] = None
+    coeff_row: List[Any] = field(default_factory=list)
+    label_row: List[Any] = field(default_factory=list)
+    row_values: List[Any] = field(default_factory=list)  # окно строки даты (UNFORMATTED)
+
+
+def open_sheet_context(
+    config: Dict[str, Any],
+    day: date,
+    *,
+    spreadsheet: Any = None,
+    report: Optional[Dict[str, Any]] = None,
+) -> SheetContext:
+    """Открывает таблицу/вкладку/строку даты и читает шапку + окно строки.
+
+    При `google_sheets.auto_create_tab=true` недостающая месячная вкладка
+    создаётся из реестра метрик (sheet_builder); `report` даёт имена кабинетов
+    текущего дня для шапки создаваемой вкладки.
+    """
+    gs_cfg = config.get("google_sheets") or {}
+    if not gs_cfg.get("enabled", False):
+        return SheetContext(enabled=False)
+
+    if spreadsheet is None:
+        spreadsheet = _build_gsheets_spreadsheet(config)
+        if spreadsheet is None:
+            return SheetContext(error="не удалось открыть spreadsheet (см. логи)")
+
+    ctx = SheetContext(
+        spreadsheet=spreadsheet,
+        spreadsheet_id=str(getattr(spreadsheet, "id", None)
+                           or gs_cfg.get("spreadsheet_id") or ""),
+    )
+    ws, title = _pick_worksheet(spreadsheet, day)
+    ctx.title = title
+    if ws is None and gs_cfg.get("auto_create_tab"):
+        try:
+            import sheet_builder
+            extra = [name for name, _s, _src in _collect_cabinets(report or {})]
+            ws, _created = sheet_builder.ensure_month_worksheet(
+                spreadsheet, day, config, extra_cabinets=extra,
+            )
+        except Exception as e:
+            logger.error("Sheets/%s: автосоздание вкладки упало: %s", title, e,
+                         exc_info=True)
+            ws = None
+    if ws is None:
+        ctx.error = f"вкладка {title!r} не найдена"
+        return ctx
+    ctx.ws = ws
+
+    ctx.date_row = _find_date_row(ws, day)
+    if ctx.date_row is None:
+        ctx.error = f"дата {day.strftime('%d.%m.%Y')} не найдена в столбце A"
+        return ctx
+
+    _start_idx, _max_idx = cabinet_bounds(gs_cfg)
+    try:
+        ctx.coeff_row, ctx.label_row = _read_header(ws, _max_idx)
+    except Exception as e:
+        logger.warning("Sheets/%s: не удалось прочитать шапку A1:…2: %s", title, e)
+
+    # Окно строки даты — источник ручных значений. Ошибка чтения не фатальна:
+    # ручные метрики просто посчитаются как 0 (assumed_zero).
+    try:
+        end_idx = min(_max_idx, ws.col_count)
+        rng = f"A{ctx.date_row}:{_col_letter(end_idx)}{ctx.date_row}"
+        try:
+            rows = ws.get(rng, value_render_option="UNFORMATTED_VALUE")
+        except TypeError:  # старый gspread
+            rows = ws.get(rng)
+        ctx.row_values = rows[0] if rows else []
+    except Exception as e:
+        logger.warning("Sheets/%s: не удалось прочитать строку даты %s: %s",
+                       title, ctx.date_row, e)
+    return ctx
+
+
+def _cell_to_float(v: Any) -> Optional[float]:
+    """UNFORMATTED-ячейка → float|None (ошибки листа #DIV/0! и пр. → None)."""
+    if v is None or v == "" or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if not s or s.startswith("#"):
+        return None
+    try:
+        return float(s.replace("\xa0", "").replace(" ", "").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _ctx_row_value(ctx: SheetContext, col_letter: str) -> Optional[float]:
+    i = _col_index(col_letter) - 1
+    return _cell_to_float(ctx.row_values[i] if i < len(ctx.row_values) else None)
+
+
+def manual_cabinet_entries(gs_cfg: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Нормализованные ручные поля: [{label, name, target}].
+
+    Конфиг может содержать строки (legacy) или объекты — приводим к одному
+    виду; label — подпись колонки в кабинетной зоне листа, name — название
+    в системе, target — куда суммируется значение: "zatraty" (расход,
+    формула D; default) или "prihod" (доход, слагаемое формулы C).
+    """
+    out: List[Dict[str, str]] = []
+    for item in gs_cfg.get("manual_cabinets") or []:
+        if isinstance(item, str):
+            label = item.strip()
+            if label:
+                out.append({"label": label, "name": label, "target": "zatraty"})
+        elif isinstance(item, dict):
+            label = str(item.get("label") or "").strip()
+            if label:
+                target = str(item.get("target") or "").strip()
+                out.append({"label": label,
+                            "name": str(item.get("name") or "").strip() or label,
+                            "target": target if target in ("zatraty", "prihod") else "zatraty"})
+    return out
+
+
+def disabled_metrics(gs_cfg: Dict[str, Any]) -> set:
+    """Отключённые опциональные метрики бренда (google_sheets.disabled_metrics).
+
+    Пересечение с metrics.OPTIONAL_METRICS — мусор в конфиге игнорируется.
+    """
+    import metrics as metrics_mod
+    raw = {str(x).strip() for x in (gs_cfg.get("disabled_metrics") or [])}
+    return raw & metrics_mod.OPTIONAL_METRICS
+
+
+def manual_income_labels_norm(gs_cfg: Dict[str, Any]) -> set:
+    """Нормализованные подписи ДОХОДНЫХ ручных полей (target=prihod).
+
+    Их колонки в кабинетной зоне исключаются из формулы «Затрат» и
+    суммируются в «Приход» (manual_income).
+    """
+    return {_norm(e["label"]) for e in manual_cabinet_entries(gs_cfg)
+            if e["target"] == "prihod"}
+
+
+def manual_cabinet_labels(gs_cfg: Dict[str, Any]) -> List[str]:
+    return [e["label"] for e in manual_cabinet_entries(gs_cfg)]
+
+
+def zayavki_value(config: Dict[str, Any], report: Dict[str, Any]) -> int:
+    """Число цели Метрики для «Заявок с сайта» (столбец G)."""
+    ym = report.get("yandex_metrika") or {}
+    zayavki_metric = ((config.get("yandex_metrika") or {}).get("zayavki_metric")) or "visits"
+    if zayavki_metric not in ("reaches", "visits"):
+        zayavki_metric = "visits"
+    return _find_goal_value(ym, TARGET_GOAL_FOR_ZAYAVKI, zayavki_metric)
+
+
+def extract_manual_values(
+    ctx: Optional[SheetContext],
+    config: Dict[str, Any],
+) -> Dict[str, Optional[float]]:
+    """Значения base_manual метрик (R «Долеты и Крот»…) из строки даты листа."""
+    import metrics as metrics_mod
+
+    out: Dict[str, Optional[float]] = {k: None for k in metrics_mod.manual_keys()}
+    if ctx is None or ctx.error or not ctx.enabled or not ctx.row_values:
+        return out
+    gs_cfg = config.get("google_sheets") or {}
+    cols, _ = metrics_mod.resolve_registry_columns(
+        ctx.label_row, gs_cfg.get("column_labels") or {},
+        cabinet_bounds(gs_cfg)[0],
+    )
+    dset = disabled_metrics(gs_cfg)
+    for key in out:
+        if key in dset:
+            continue  # отключена — значение не читается, считается как 0
+        col = cols.get(key)
+        if col:
+            out[key] = _ctx_row_value(ctx, col)
+    return out
+
+
+def compute_cabinet_spend(
+    ctx: Optional[SheetContext],
+    config: Dict[str, Any],
+    report: Dict[str, Any],
+) -> Tuple[Optional[float], List[str], Dict[str, Optional[float]]]:
+    """Предсказывает слагаемое кабинетов формулы «Затрат» ровно как лист.
+
+    С живым листом: идём по колонкам кабинетной зоны (подпись строки 2
+    непуста); значение колонки = свежий spent из отчёта (если кабинет отчёта
+    матчится в эту колонку — так же его запишет writer) либо текущее значение
+    ячейки (ручные AVITO/Google и колонки, которые сегодняшний прогон не
+    трогает); множитель — из строки 1. Это в точности сумма, которую даст
+    формула D после записи. Кабинеты отчёта БЕЗ колонки в шапке в лист не
+    попадают и в сумму не входят (как и в формулу D) — warning.
+
+    Без листа (enabled=false/ошибка): фолбэк — Σ spent×коэф из конфига
+    `google_sheets.cabinet_coeffs` (дефолт 1); ручные значения недоступны.
+
+    Возвращает (сумма|None, warnings, {label ручного поля: значение|None}).
+    """
+    gs_cfg = config.get("google_sheets") or {}
+    cfg_coeffs = {_norm(k): float(v) for k, v in (gs_cfg.get("cabinet_coeffs") or {}).items()}
+    warnings: List[str] = []
+    cabinets = _collect_cabinets(report)
+    manual_vals: Dict[str, Optional[float]] = {
+        e["label"]: None for e in manual_cabinet_entries(gs_cfg)
+    }
+
+    if ctx is None or ctx.error or not ctx.enabled or not ctx.label_row:
+        if not cabinets:
+            return None, warnings, manual_vals
+        total = sum(float(spent) * cfg_coeffs.get(_norm(name), 1.0)
+                    for name, spent, _src in cabinets)
+        return total, warnings, manual_vals
+
+    headers_map: Dict[str, str] = {}
+    coeffs_map: Dict[str, float] = {}
+    income_norm = manual_income_labels_norm(gs_cfg)
+    start_idx, _ = cabinet_bounds(gs_cfg)
+    for idx0 in range(start_idx - 1, len(ctx.label_row)):
+        norm = _norm(str(ctx.label_row[idx0]))
+        if not norm:
+            continue
+        col = _col_letter(idx0 + 1)
+        headers_map.setdefault(norm, col)
+        if norm in income_norm:
+            continue  # доходное поле: не слагаемое Затрат (уйдёт в Приход)
+        raw = ctx.coeff_row[idx0] if idx0 < len(ctx.coeff_row) else None
+        coeffs_map[col] = _parse_coeff(raw)
+
+    # свежие spent по колонкам — как их запишет writer (суммирование дублей)
+    by_col_spent: Dict[str, float] = {}
+    unmatched_spend = 0.0
+    for name, spent, _source in cabinets:
+        col = _find_header_column(headers_map, name)
+        if col is None:
+            unmatched_spend += float(spent)
+            continue
+        by_col_spent[col] = by_col_spent.get(col, 0.0) + float(spent)
+        # расхождение коэффициентов конфиг vs строка 1 — громко
+        cfg_k = cfg_coeffs.get(_norm(name))
+        if cfg_k is not None and abs(cfg_k - coeffs_map.get(col, 1.0)) > 1e-9:
+            warnings.append(
+                f"кабинет {name!r}: коэффициент в конфиге {cfg_k} ≠ строке 1 "
+                f"листа {coeffs_map.get(col)} — считаю по листу"
+            )
+    if unmatched_spend:
+        warnings.append(
+            f"кабинеты без колонки в шапке на {round(unmatched_spend, 2)} — "
+            "в лист и в Затраты не попадают"
+        )
+
+    total = 0.0
+    for col, k in coeffs_map.items():
+        v = by_col_spent.get(col)
+        if v is None:
+            v = _ctx_row_value(ctx, col)  # ручные/нетронутые колонки — из ячейки
+        if v is not None:
+            total += v * k
+
+    # значения зарегистрированных ручных полей — для отчёта/UI
+    for label in manual_vals:
+        col = headers_map.get(_norm(label))
+        if col is not None:
+            manual_vals[label] = _ctx_row_value(ctx, col)
+    return total, warnings, manual_vals
+
+
 def write_daily_report(
     config: Dict[str, Any],
     day: date,
     report: Dict[str, Any],
     *,
     spreadsheet: Any = None,
+    dry_run: bool = False,
+    context: Optional["SheetContext"] = None,
 ) -> Dict[str, Any]:
     """Пишет отчёт в Google Sheets. Возвращает сводку для API-ответа.
+
+    `context` — заранее открытый open_sheet_context (build_report открывает
+    его до вычисления метрик, чтобы прочитать ручные значения); без него
+    контекст открывается здесь — сигнатура обратно совместима.
+
+    При `dry_run=True` в таблицу ничего не пишется, а собранный batch
+    возвращается в сводке (ключ "batch") — для отладки/дифф-проверок.
 
     Структура результата:
         {
@@ -427,37 +866,32 @@ def write_daily_report(
           "matched": [{"name", "spent", "column", "source"}, ...],
           "unmatched": [{"name", "spent", "source"}, ...],  # в таблицу не пишутся
           "fixed": {"prihod": .., "clicks_lt": .., ...},
+          "resolved_columns": {"prihod": "C", ...},  # привязка метрик по шапке
+          "header_warnings": ["...", ...],           # промахи подписей и т.п.
+          "skipped_metrics": ["clicks_lt", ...],     # не записаны (strict)
           "error": "... (если что-то сломалось)",
         }
     """
     gs_cfg = config.get("google_sheets") or {}
-    if not gs_cfg.get("enabled", False):
+    if context is None:
+        context = open_sheet_context(config, day, spreadsheet=spreadsheet)
+    if not context.enabled:
         return {"enabled": False, "reason": "google_sheets.enabled = false"}
+    if context.error:
+        out: Dict[str, Any] = {"enabled": True, "error": context.error}
+        if context.ws is not None:  # вкладка нашлась, не нашлась дата — как раньше
+            out["worksheet"] = context.title
+        return out
 
-    if spreadsheet is None:
-        spreadsheet = _build_gsheets_spreadsheet(config)
-        if spreadsheet is None:
-            return {"enabled": True, "error": "не удалось открыть spreadsheet (см. логи)"}
-
-    ws, title = _pick_worksheet(spreadsheet, day)
-    if ws is None:
-        return {"enabled": True, "error": f"вкладка {title!r} не найдена"}
-
-    date_row = _find_date_row(ws, day)
-    if date_row is None:
-        return {
-            "enabled": True,
-            "worksheet": title,
-            "error": f"дата {day.strftime('%d.%m.%Y')} не найдена в столбце A",
-        }
+    spreadsheet = context.spreadsheet
+    ws, title = context.ws, context.title
+    date_row = context.date_row
+    coeff_row, label_row = context.coeff_row, context.label_row
 
     leadstech = report.get("leadstech") or {}
     ym = report.get("yandex_metrika") or {}
     ec = report.get("eightconnect") or {}
-    zayavki_metric = ((config.get("yandex_metrika") or {}).get("zayavki_metric")) or "visits"
-    if zayavki_metric not in ("reaches", "visits"):
-        zayavki_metric = "visits"
-    zayavki_val = _find_goal_value(ym, TARGET_GOAL_FOR_ZAYAVKI, zayavki_metric)
+    zayavki_val = zayavki_value(config, report)
 
     fixed = {
         "prihod":               float(leadstech.get("sum") or 0),
@@ -471,15 +905,20 @@ def write_daily_report(
         "eightconnect_clients": int(ec.get("clients") or 0),
     }
 
-    # Шаблонные формулы из строки 33 — идут ПЕРВЫМИ; если наша логика пишет
-    # в ту же колонку (C, D, E, F, G, AI, AC, AE, AR..CL), последняя запись в
-    # batch_update перекроет шаблон.
-    try:
-        template = _load_template_formulas(ws, title)
-    except Exception as e:
-        logger.warning("Sheets/%s: не удалось загрузить шаблон строки %d: %s",
-                       title, TEMPLATE_ROW, e)
-        template = {}
+    # Managed-режим: формулы строки даты генерятся из реестра метрик
+    # (metrics.py), шаблонная строка 33 не используется вовсе.
+    managed = bool(gs_cfg.get("managed_formulas"))
+
+    # Шаблонные формулы из строки 33 (только legacy) — идут ПЕРВЫМИ; если наша
+    # логика пишет в ту же колонку, последняя запись в batch_update перекроет
+    # шаблон.
+    template: Dict[str, str] = {}
+    if not managed:
+        try:
+            template = _load_template_formulas(ws, context.spreadsheet_id, title)
+        except Exception as e:
+            logger.warning("Sheets/%s: не удалось загрузить шаблон строки %d: %s",
+                           title, TEMPLATE_ROW, e)
 
     template_batch: List[Dict[str, Any]] = [
         {"range": f"{col}{date_row}",
@@ -487,61 +926,169 @@ def write_daily_report(
         for col, formula in template.items()
     ]
 
-    # --- Шапка кабинетов (строка 2) + коэффициенты «Затрат» (строка 1) ---
-    # Читаем ДО сборки batch: D-формула ниже строится из coeffs_map.
-    header_range, coeff_range = _cabinet_ranges(ws)
-    header_cells: List[str] = []
-    coeff_cells: List[Any] = []
-    if header_range is None:
-        logger.warning(
-            "Sheets/%s: на листе всего %d столбцов — колонка %s ещё не создана, "
-            "кабинеты в этом месяце не будут сматчены",
-            title, ws.col_count, CABINET_START_COL,
+    # Шапка (строка 1 — коэффициенты, строка 2 — подписи/кабинеты) уже
+    # прочитана в контексте; D-формула строится из coeffs_map ниже.
+    cab_start_idx, _cab_max_idx = cabinet_bounds(gs_cfg)
+    cols, header_warnings = _resolve_agg_columns(
+        label_row, gs_cfg.get("column_labels") or {}, cab_start_idx
+    )
+    if _norm(str(label_row[0] if label_row else "")) != "дата":
+        header_warnings.append(
+            "в A2 не «Дата» — проверь, что даты по-прежнему в столбце A"
         )
-    else:
-        header_row = ws.get(header_range)  # [[имя1, имя2, ...]]
-        header_cells = header_row[0] if header_row else []
-        try:
-            coeff_row = ws.get(coeff_range, value_render_option="UNFORMATTED_VALUE")
-        except TypeError:  # старый gspread без kwarg'а
-            coeff_row = ws.get(coeff_range)
-        coeff_cells = coeff_row[0] if coeff_row else []
 
     headers_map: Dict[str, str] = {}
     coeffs_map: Dict[str, float] = {}
-    start_col_idx = _col_index(CABINET_START_COL)
-    for offset, cell in enumerate(header_cells):
-        norm = _norm(cell)
+    income_norm = manual_income_labels_norm(gs_cfg)
+    income_cols: List[str] = []  # колонки доходных ручных полей (слагаемые C)
+    start_col_idx = cab_start_idx
+    if len(label_row) < start_col_idx:
+        logger.warning(
+            "Sheets/%s: шапка кончается до колонки %s — кабинеты в этом "
+            "месяце не будут сматчены", title, _col_letter(start_col_idx),
+        )
+    for idx0 in range(start_col_idx - 1, len(label_row)):
+        norm = _norm(str(label_row[idx0]))
         if not norm:
             continue
-        col = _col_letter(start_col_idx + offset)
+        col = _col_letter(idx0 + 1)
         headers_map.setdefault(norm, col)
-        # Коэффициент — из строки 1 над именем (тот же offset). Пусто → 1.
-        raw = coeff_cells[offset] if offset < len(coeff_cells) else None
+        if norm in income_norm:
+            income_cols.append(col)  # в Затраты не входит
+            continue
+        # Коэффициент — из строки 1 над именем (та же колонка). Пусто → 1.
+        raw = coeff_row[idx0] if idx0 < len(coeff_row) else None
         coeffs_map[col] = _parse_coeff(raw)
 
+    logger.info("Sheets: привязка метрик: %s", cols)
+    if header_warnings:
+        logger.warning("Sheets/%s: header warnings: %s", title, header_warnings)
     logger.info("Sheets: заголовки шапки (%d): %s", len(headers_map),
                 {v: k for k, v in list(headers_map.items())})
     non_unit = {c: k for c, k in coeffs_map.items() if k != 1}
     logger.info("Sheets: коэффициенты ≠1 (%d): %s", len(non_unit), non_unit)
 
-    batch: List[Dict[str, Any]] = template_batch + [
-        # AC — слагаемое формулы D; пишем ДО D, чтобы batch_update увидел актуальное значение.
-        {"range": f"{COL_8CONN_COST}{date_row}",     "values": [[fixed["eightconnect_cost"]]]},
-        {"range": f"{COL_8CONN_CHARGE}{date_row}",   "values": [[fixed["eightconnect_charge"]]]},
-        # AB — кол-во SMS, AF — клиенты (по требованию всегда 0).
-        {"range": f"{COL_8CONN_COUNT}{date_row}",    "values": [[fixed["eightconnect_count"]]]},
-        {"range": f"{COL_8CONN_CLIENTS}{date_row}",  "values": [[0]]},
-        # AJ (доход с витрины) = sumwebmaster − AE; пишем ДО C, т.к. C ссылается на AJ.
-        {"range": f"{COL_DOHOD_VITRINA}{date_row}",  "values": [[_build_dohod_vitrina_formula(date_row, fixed["prihod"])]]},
-        # C (Приход) — формула =AE+AJ+AF+R (AF пишется чуть выше).
-        {"range": f"{COL_PRIHOD}{date_row}",         "values": [[_build_prihod_formula(date_row)]]},
-        {"range": f"{COL_ZATRATY}{date_row}",        "values": [[_build_zatraty_formula(date_row, coeffs_map)]]},
-        {"range": f"{COL_CLICKS_LT}{date_row}",      "values": [[fixed["clicks_lt"]]]},
-        {"range": f"{COL_METRIKA_V}{date_row}",      "values": [[fixed["metrika_v"]]]},
-        {"range": f"{COL_ZAYAVKI}{date_row}",        "values": [[fixed["zayavki"]]]},
-        {"range": f"{COL_PEREHODY}{date_row}",       "values": [[fixed["perehody"]]]},
-    ]
+    batch: List[Dict[str, Any]] = list(template_batch)
+    skipped_metrics: List[str] = []
+
+    def _add(key: str, value: Any) -> None:
+        col = cols.get(key)
+        if col is None:
+            skipped_metrics.append(key)
+            return
+        batch.append({"range": f"{col}{date_row}", "values": [[value]]})
+
+    def _add_formula(key: str, operands: Tuple[str, ...], build) -> None:
+        # Strict: формулу с неразрешённым операндом не пишем целиком — молча
+        # выкинуть слагаемое значит тихо исказить сумму. Ячейку в этом случае
+        # заполнит шаблонная формула строки 33 (template_batch выше).
+        missing = [k for k in operands if k not in cols]
+        if missing:
+            skipped_metrics.append(key)
+            header_warnings.append(
+                f"формула {key} не записана: не разрешены операнды "
+                + ", ".join(missing)
+            )
+            return
+        _add(key, build())
+
+    # sms_cost — слагаемое формулы D; sms_charge — операнд dohod_vitrina/prihod.
+    _add("sms_cost",    fixed["eightconnect_cost"])
+    _add("sms_charge",  fixed["eightconnect_charge"])
+    _add("sms_count",   fixed["eightconnect_count"])
+    _add("sms_clients", 0)  # по требованию всегда 0
+    dset = disabled_metrics(gs_cfg)
+    if not managed:
+        # Legacy: три формулы как раньше, остальные колонки — клон строки 33.
+        _add_formula("dohod_vitrina", ("sms_charge",),
+                     lambda: _build_dohod_vitrina_formula(date_row, fixed["prihod"], cols))
+        prihod_ops = tuple(k for k in ("sms_charge", "dohod_vitrina", "sms_clients", "dolety")
+                           if k not in dset)
+        _add_formula("prihod", prihod_ops,
+                     lambda: _build_prihod_formula(
+                         date_row, cols, income_cols,
+                         skip=[cols[k] for k in ("dolety",) if k in dset and k in cols]))
+        _add_formula("zatraty", ZATRATY_PLAIN_KEYS,
+                     lambda: _build_zatraty_formula(
+                         date_row, coeffs_map, [cols[k] for k in ZATRATY_PLAIN_KEYS]))
+    _add("clicks_lt", fixed["clicks_lt"])
+    _add("metrika_v", fixed["metrika_v"])
+    _add("zayavki",   fixed["zayavki"])
+    _add("perehody",  fixed["perehody"])
+
+    if managed:
+        # Формулы ВСЕХ вычисляемых метрик из реестра — самовосстановление
+        # после ручных правок. Колонки — по подписям строки 2 (полный реестр).
+        # Ручные метрики (R «Долеты и Крот») и ручные кабинетные колонки
+        # здесь не пишутся никогда.
+        import metrics as metrics_mod
+        reg_cols, reg_warns = metrics_mod.resolve_registry_columns(
+            label_row, gs_cfg.get("column_labels") or {}, cab_start_idx
+        )
+        a1ctx = metrics_mod.A1Context(
+            colmap=reg_cols, row=date_row,
+            literals={"lt_sumwebmaster": fixed["prihod"]},
+            cabinet_terms=sorted(coeffs_map.items(), key=lambda ck: _col_index(ck[0])),
+            income_terms=sorted(income_cols, key=_col_index),
+            disabled=dset,
+        )
+        hidden = {k for k, m in metrics_mod.METRICS.items() if m.col is None}
+        for key in metrics_mod.computed_keys():
+            col = reg_cols.get(key)
+            if col is None:
+                skipped_metrics.append(key)
+                continue
+            deps = set(metrics_mod._expr_names(metrics_mod._PARSED[key]))
+            missing = [d for d in deps
+                       if d not in metrics_mod._PSEUDO_VARS and d not in hidden
+                       and d not in reg_cols]
+            if missing:
+                skipped_metrics.append(key)
+                labels = ", ".join(
+                    f"«{(metrics_mod.METRICS[d].label or d)}»" for d in missing)
+                header_warnings.append(
+                    f"managed: формула {key} не записана — не найдена колонка "
+                    f"операнда {labels}")
+                continue
+            try:
+                formula = metrics_mod.expr_to_a1(key, a1ctx)
+            except Exception as e:
+                skipped_metrics.append(key)
+                header_warnings.append(f"managed: формула {key} не записана: {e}")
+                continue
+            if formula is None:
+                continue  # выродилась из-за отключённых метрик — намеренно
+            batch.append({"range": f"{col}{date_row}", "values": [[formula]]})
+        if reg_warns:
+            header_warnings.extend(f"managed: {w}" for w in reg_warns)
+
+        # Итоговая строка месяца (оцифровка строки 34 эталона) — формулы из
+        # реестра переписываются каждый прогон: самовосстановление + новые
+        # кабинетные колонки автоматически получают SUM. Реордер-устойчиво:
+        # колонки резолвятся по подписям (reg_cols/coeffs_map).
+        import calendar
+        days_in_month = calendar.monthrange(day.year, day.month)[1]
+        first_data, last_data = 3, 2 + days_in_month  # даты в строках 3..2+N
+        totals_row = last_data + 1
+        if getattr(ws, "row_count", totals_row) < totals_row:
+            header_warnings.append(
+                f"managed: итоговая строка {totals_row} за пределами листа — пропущена")
+        else:
+            t_ctx = metrics_mod.A1Context(
+                colmap=reg_cols, row=totals_row, literals={},
+                cabinet_terms=[], income_terms=[], disabled=dset,
+            )
+            for key in metrics_mod.TOTALS:
+                try:
+                    f = metrics_mod.total_formula(key, t_ctx, first_data, last_data)
+                except Exception:
+                    f = None  # неразрешённый операнд expr-итога — пропуск
+                if f:
+                    batch.append({"range": f"{reg_cols[key]}{totals_row}",
+                                  "values": [[f]]})
+            for col in sorted(set(coeffs_map) | set(income_cols), key=_col_index):
+                batch.append({"range": f"{col}{totals_row}",
+                              "values": [[f"=SUM({col}{first_data}:{col}{last_data})"]]})
 
     # --- Матчинг кабинетов (headers_map собран выше вместе с коэффициентами) ---
     cabinets = _collect_cabinets(report)
@@ -572,17 +1119,18 @@ def write_daily_report(
         for name, spent, source in unmatched
     ]
 
-    if batch:
+    if batch and not dry_run:
         ws.batch_update(batch, value_input_option="USER_ENTERED")
 
     logger.info(
         "Sheets: %s / row %d — fixed=%s, matched=%d cabs, unmatched=%d (в таблицу не пишутся), "
-        "template-formulas=%d",
+        "template-formulas=%d, skipped=%s%s",
         title, date_row, fixed, len(matched), len(unmatched_out),
-        len(template_batch),
+        len(template_batch), skipped_metrics or "—",
+        " [DRY RUN]" if dry_run else "",
     )
 
-    return {
+    summary: Dict[str, Any] = {
         "enabled": True,
         "worksheet": title,
         "date_row": date_row,
@@ -590,4 +1138,11 @@ def write_daily_report(
         "matched": matched,
         "unmatched": unmatched_out,
         "template_formulas": len(template_batch),
+        "resolved_columns": cols,
+        "header_warnings": header_warnings,
+        "skipped_metrics": skipped_metrics,
     }
+    if dry_run:
+        summary["dry_run"] = True
+        summary["batch"] = batch
+    return summary

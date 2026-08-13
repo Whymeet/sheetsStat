@@ -6,9 +6,11 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      # cfg — конфиг (токены, кабинеты), редактируется через UI и остаётся на хосте
+      # data — SQLite (профили + история прогонов), основное хранилище
+      - ./data:/app/data
+      # cfg — service_account.json для Sheets + архив старых json-конфигов
       - ./cfg:/app/cfg
-      # output — куда сохраняются отчёты
+      # output — архив старых json-отчётов (после миграции в БД не пишется)
       - ./output:/app/output
       # logs — если понадобится файловое логирование
       - ./logs:/app/logs

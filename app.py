@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shutil
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -42,8 +41,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from core import build_report
-from scheduler import ReportScheduler
+import db
+from core import ReportCancelled, build_report
+from scheduler import ReportScheduler, SAMARA_TZ
 
 
 _SPREADSHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
@@ -133,50 +133,30 @@ def _validate_pid(pid: str) -> str:
     return pid
 
 
-def _profile_file(pid: str) -> Path:
-    return PROFILES_DIR / f"{pid}.json"
-
-
-def _default_manifest() -> Dict[str, Any]:
-    return {"version": 1, "active_id": None, "order": [],
-            "schedule": {"enabled": False, "time": "09:00"}}
-
+# Хранилище — SQLite (db.py). Функции ниже сохраняют старые файловые
+# сигнатуры, чтобы роуты не менялись; «манифест» собирается на лету из
+# app_state + порядка профилей.
 
 def read_manifest() -> Dict[str, Any]:
-    if not MANIFEST_PATH.exists():
-        return _default_manifest()
-    try:
-        m = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _default_manifest()
-    m.setdefault("version", 1)
-    m.setdefault("order", [])
-    m.setdefault("schedule", {"enabled": False, "time": "09:00"})
-    if "active_id" not in m:
-        m["active_id"] = m["order"][0] if m["order"] else None
-    return m
+    return {
+        "version": 1,
+        "active_id": db.get_active_id(),
+        "order": db.list_profile_ids(),
+        "schedule": db.get_default_schedule(),
+    }
 
 
 def write_manifest(m: Dict[str, Any]) -> None:
-    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if MANIFEST_PATH.exists():
-        shutil.copy2(MANIFEST_PATH, MANIFEST_PATH.with_suffix(".json.bak"))
-    MANIFEST_PATH.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _read_profile_safe(pid: str) -> Optional[Dict[str, Any]]:
-    path = _profile_file(pid)
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    # Порядок профилей живёт в profiles.sort_order (create — в конец,
+    # delete — строка исчезает), здесь сохраняются только остальные поля.
+    db.set_active_id(m.get("active_id"))
+    if isinstance(m.get("schedule"), dict):
+        db.set_default_schedule(m["schedule"])
 
 
 def read_profile(pid: str) -> Dict[str, Any]:
     _validate_pid(pid)
-    data = _read_profile_safe(pid)
+    data = db.get_profile(pid)
     if data is None:
         raise HTTPException(status_code=404, detail=f"profile not found: {pid}")
     return data
@@ -184,23 +164,11 @@ def read_profile(pid: str) -> Dict[str, Any]:
 
 def write_profile(pid: str, data: Dict[str, Any]) -> None:
     _validate_pid(pid)
-    path = _profile_file(pid)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        shutil.copy2(path, path.with_suffix(".json.bak"))
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    db.upsert_profile(pid, data)
 
 
 def list_profile_ids() -> List[str]:
-    """Порядок из манифеста; самовосстановление по содержимому каталога."""
-    m = read_manifest()
-    order = [pid for pid in m.get("order", []) if _profile_file(pid).exists()]
-    if PROFILES_DIR.exists():
-        for p in sorted(PROFILES_DIR.glob("*.json")):
-            pid = p.stem
-            if _PROFILE_ID_RE.match(pid) and pid not in order:
-                order.append(pid)
-    return order
+    return db.list_profile_ids()
 
 
 def _empty_profile_body(name: str, sub1: str = "") -> Dict[str, Any]:
@@ -225,77 +193,145 @@ def _empty_profile_body(name: str, sub1: str = "") -> Dict[str, Any]:
     }
 
 
-def ensure_profiles_migrated() -> None:
-    """Идемпотентно: при первом старте создаёт профили из legacy-конфига."""
-    if MANIFEST_PATH.exists():
-        return
-    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+_RUN_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(.+)__([a-z0-9-]+)\.json$")
+_EIGHTCONNECT_FILE_RE = re.compile(r"^8connect_(\d{4}-\d{2}-\d{2})\.json$")
 
+
+def _collect_file_profiles() -> tuple[List[tuple[str, Dict[str, Any]]], Optional[str], Dict[str, Any]]:
+    """Снимок профилей из файлового хранилища (или legacy, или дефолт)."""
+    default_schedule = {"enabled": False, "time": "09:00"}
+
+    if MANIFEST_PATH.exists():
+        try:
+            m = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            m = {}
+        if isinstance(m.get("schedule"), dict):
+            default_schedule = {"enabled": bool(m["schedule"].get("enabled", False)),
+                                "time": m["schedule"].get("time") or "09:00"}
+        # порядок: манифест + glob-хвост (как старый list_profile_ids)
+        order = [pid for pid in (m.get("order") or [])
+                 if (PROFILES_DIR / f"{pid}.json").exists()]
+        if PROFILES_DIR.exists():
+            for p in sorted(PROFILES_DIR.glob("*.json")):
+                if _PROFILE_ID_RE.match(p.stem) and p.stem not in order:
+                    order.append(p.stem)
+        profiles: List[tuple[str, Dict[str, Any]]] = []
+        for pid in order:
+            try:
+                cfg = json.loads((PROFILES_DIR / f"{pid}.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning("Миграция в БД: профиль %r НЕ перенесён — битый файл (%s); "
+                               "файл остался на диске, восстанови и удали data/sheetsstat.db "
+                               "для повторной миграции", pid, e)
+                continue
+            if not isinstance(cfg.get("schedule"), dict):
+                cfg["schedule"] = dict(default_schedule)  # бывший seed
+            profiles.append((pid, cfg))
+        ids = [pid for pid, _ in profiles]
+        active_id = m.get("active_id") if m.get("active_id") in ids else (ids[0] if ids else None)
+        return profiles, active_id, default_schedule
+
+    # Манифеста нет: либо совсем legacy lt_vk_config.json, либо чистая установка.
     old = None
     if CONFIG_PATH.exists():
         try:
             old = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             old = None
-
     if old:
         sched = old.get("schedule") or {}
-        sub1 = (sched.get("sub1") or "kub").strip() or "kub"
-        sched_block = {"enabled": bool(sched.get("enabled", False)),
-                       "time": (sched.get("time") or "09:00")}
+        default_schedule = {"enabled": bool(sched.get("enabled", False)),
+                            "time": (sched.get("time") or "09:00")}
         name = "Основной"
         pid = _gen_id(name, set())
         body = {k: v for k, v in old.items() if k != "schedule"}
         body["name"] = name
-        body["sub1"] = sub1
-        body["schedule"] = dict(sched_block)
-        write_profile(pid, body)
-        write_manifest({
-            "version": 1, "active_id": pid, "order": [pid],
-            "schedule": sched_block,  # дефолт времени для новых брендов
-        })
-        logger.info("Профили: мигрировал lt_vk_config.json → профиль %r", pid)
-    else:
-        pid = _gen_id("Основной", set())
-        write_profile(pid, _empty_profile_body("Основной"))
-        write_manifest({
-            "version": 1, "active_id": pid, "order": [pid],
-            "schedule": {"enabled": False, "time": "09:00"},
-        })
-        logger.info("Профили: создан дефолтный профиль %r", pid)
+        body["sub1"] = (sched.get("sub1") or "kub").strip() or "kub"
+        body["schedule"] = dict(default_schedule)
+        logger.info("Миграция в БД: legacy lt_vk_config.json → профиль %r", pid)
+        return [(pid, body)], pid, default_schedule
+
+    pid = _gen_id("Основной", set())
+    logger.info("Миграция в БД: файлов нет, создаю дефолтный профиль %r", pid)
+    return [(pid, _empty_profile_body("Основной"))], pid, default_schedule
+
+
+def _collect_file_runs() -> tuple[List[Dict[str, Any]], List[tuple[str, Any]]]:
+    """Снимок прогонов из output/*.json + дампов 8connect.
+
+    rglob покрывает и подкаталоги-аномалии (sub1 со слэшем когда-то раскладывал
+    отчёты по подпапкам). При дублях (pid, date) побеждает файл с бóльшим mtime.
+    """
+    runs_by_key: Dict[tuple, Dict[str, Any]] = {}
+    eightconnect: Dict[str, Any] = {}
+    skipped = 0
+    if not OUTPUT_DIR.exists():
+        return [], []
+    files = sorted(OUTPUT_DIR.rglob("*.json"), key=lambda p: p.stat().st_mtime)
+    for p in files:
+        rel = p.relative_to(OUTPUT_DIR).as_posix()
+        m_run = _RUN_FILE_RE.match(rel)
+        m_ec = _EIGHTCONNECT_FILE_RE.match(rel)
+        if not m_run and not m_ec:
+            logger.info("Миграция в БД: %r не похож на отчёт/дамп — пропуск", rel)
+            skipped += 1
+            continue
+        try:
+            content = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Миграция в БД: %r пропущен — битый JSON (%s)", rel, e)
+            skipped += 1
+            continue
+        if m_ec:
+            eightconnect[m_ec.group(1)] = content
+            continue
+        day, sub1, pid = m_run.groups()
+        mtime_iso = datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")
+        runs_by_key[(pid, day)] = {
+            "profile_id": pid,
+            "date": day,
+            "sub1": sub1,
+            "ok": True,
+            "trigger": "import",
+            "google_sheets_error": (content.get("google_sheets") or {}).get("error")
+                                   if isinstance(content, dict) else None,
+            "cabinet_count": content.get("cabinet_count") if isinstance(content, dict) else None,
+            "started_at": mtime_iso,
+            "finished_at": mtime_iso,
+            "report": content,
+        }
+    if skipped:
+        logger.info("Миграция в БД: пропущено файлов: %d", skipped)
+    return list(runs_by_key.values()), sorted(eightconnect.items())
+
+
+def migrate_files_to_db() -> None:
+    """Одноразовый перенос файлового хранилища в SQLite.
+
+    Гейт — пустая таблица profiles. Файлы НЕ изменяются и НЕ удаляются
+    (архив; для повторной миграции достаточно удалить data/sheetsstat.db).
+    """
+    if not db.is_empty():
+        return
+    profiles, active_id, default_schedule = _collect_file_profiles()
+    runs, eightconnect = _collect_file_runs()
+    db.import_snapshot(profiles, active_id, default_schedule, runs, eightconnect)
+    logger.info(
+        "Миграция в БД: перенесено профилей=%d (active=%r), прогонов=%d, "
+        "8connect-дампов=%d → %s; исходные файлы остались как архив",
+        len(profiles), active_id, len(runs), len(eightconnect), db.DB_PATH,
+    )
 
 
 def _effective_schedule(cfg: Dict[str, Any], default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Расписание бренда. Если в профиле его нет (не мигрирован) — берём дефолт
-    из манифеста, чтобы старое общее время не потерялось до записи seed'а."""
+    """Расписание бренда; страховка на случай профиля без блока schedule
+    (например, после ручной правки БД) — дефолт из app_state."""
     sched = cfg.get("schedule")
     if isinstance(sched, dict):
         return {"enabled": bool(sched.get("enabled", False)), "time": sched.get("time") or "09:00"}
-    md = default if default is not None else (read_manifest().get("schedule") or {})
+    md = default if default is not None else db.get_default_schedule()
     return {"enabled": bool(md.get("enabled", False)), "time": md.get("time") or "09:00"}
-
-
-def ensure_profile_schedules_seeded() -> None:
-    """Идемпотентно: у профилей без блока `schedule` засевает его из манифеста.
-
-    Нужно для профилей, созданных до перехода на расписание-на-бренд (когда
-    время было общим в манифесте). Запускается один раз при старте. Ошибка
-    записи (например, нет прав на файл) не валит старт — расписание всё равно
-    подхватится из манифеста через _effective_schedule.
-    """
-    manifest_sched = read_manifest().get("schedule") or {"enabled": False, "time": "09:00"}
-    for pid in list_profile_ids():
-        cfg = _read_profile_safe(pid)
-        if cfg is None or isinstance(cfg.get("schedule"), dict):
-            continue
-        cfg["schedule"] = {"enabled": bool(manifest_sched.get("enabled", False)),
-                           "time": manifest_sched.get("time") or "09:00"}
-        try:
-            write_profile(pid, cfg)
-            logger.info("Профиль %r: засеял schedule из манифеста (%s)", pid, cfg["schedule"])
-        except OSError as e:
-            logger.warning("Профиль %r: не смог записать seed расписания (%s) — "
-                           "расписание берётся из манифеста на лету", pid, e)
 
 
 def _mask_secrets(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -422,6 +458,73 @@ class GoogleSheetsSettings(BaseModel):
     enabled: bool = False
     spreadsheet_id: str = ""
     service_account_json_path: str = "cfg/service_account.json"
+    # Переопределение подписей агрегатных колонок листа для нестандартных
+    # шапок (ключ — метрика из metrics.METRICS, значение — подпись в строке 2).
+    column_labels: Dict[str, str] = {}
+    # Переопределение «названий внутри системы» (как метрика зовётся в нашем
+    # UI: блок метрик отчёта, человекочитаемые формулы). Не влияет на таблицу.
+    metric_names: Dict[str, str] = {}
+    # Семантический движок метрик / генерация листов:
+    # managed_formulas — формулы строк генерятся из реестра (metrics.py), а не
+    # клонируются из строки 33; auto_create_tab — недостающая месячная вкладка
+    # создаётся автоматически; cabinet_coeffs — {имя кабинета: коэффициент} для
+    # бэкенд-расчёта Затрат и генерации листов (строка 1 живого листа главнее
+    # при записи в существующие); manual_cabinets — ручные колонки расходов в
+    # кабинетной зоне (AVITO, Google): бэкенд читает, никогда не пишет;
+    # cabinets — имена кабинетов для шапки генерируемого листа; share_with —
+    # кому расшарить таблицу, созданную с нуля.
+    managed_formulas: bool = False
+    auto_create_tab: bool = False
+    cabinet_coeffs: Dict[str, float] = {}
+    # Ручные поля расходов кабинетной зоны: [{label: подпись колонки в листе,
+    # name: название в системе}]. Legacy-строки нормализуются валидатором.
+    # Управляются из вкладки «Метрики» (+/✕); значения вводят люди в листе,
+    # бэкенд читает и суммирует в «Затраты» с коэффициентом 1.
+    manual_cabinets: List[Any] = []
+    cabinets: List[str] = []
+
+    @field_validator("manual_cabinets", mode="before")
+    @classmethod
+    def _normalize_manual_cabinets(cls, v):
+        out = []
+        for item in (v or []):
+            if isinstance(item, str):
+                label = item.strip()
+                if label:
+                    out.append({"label": label, "name": label, "target": "zatraty"})
+            elif isinstance(item, dict):
+                label = str(item.get("label") or "").strip()
+                if label:
+                    target = str(item.get("target") or "").strip()
+                    out.append({"label": label,
+                                "name": str(item.get("name") or "").strip() or label,
+                                "target": target if target in ("zatraty", "prihod") else "zatraty"})
+        return out
+    share_with: List[str] = []
+    # Отключённые опциональные метрики (metrics.OPTIONAL_METRICS): например
+    # "dolety" — тогда слагаемое выпадает из формулы «Прихода», значение не
+    # читается, зависимые формулы (бекендер) не пишутся. Мусор отбрасывается.
+    disabled_metrics: List[str] = []
+
+    @field_validator("disabled_metrics", mode="before")
+    @classmethod
+    def _normalize_disabled(cls, v):
+        import metrics as metrics_mod
+        return sorted({str(x).strip() for x in (v or [])} & metrics_mod.OPTIONAL_METRICS)
+
+    # Область расходов кабинетов на листе (редактируется в UI). Пусто = AR..EZ.
+    # Начало не может залезать в агрегатную зону — при чтении клампится до AN
+    # (sheets_writer.cabinet_bounds).
+    cabinet_start_col: str = ""
+    cabinet_max_col: str = ""
+
+    @field_validator("cabinet_start_col", "cabinet_max_col", mode="before")
+    @classmethod
+    def _normalize_col_letter(cls, v):
+        s = str(v or "").strip().upper()
+        if s and not (s.isalpha() and s.isascii() and len(s) <= 3):
+            raise ValueError(f"колонка должна быть буквами A..ZZZ, получено {v!r}")
+        return s
 
     @field_validator("spreadsheet_id", mode="before")
     @classmethod
@@ -472,10 +575,18 @@ class ProfileRename(BaseModel):
     name: str
 
 
+# Токены отмены активных ручных прогонов: token -> отменён ли.
+# Кнопка «Отменить» в UI дёргает POST /api/report/cancel — сборка обрывается
+# между стадиями, отменённый день никуда не записывается.
+_CANCEL_TOKENS: Dict[str, bool] = {}
+
+
 class ReportRequest(BaseModel):
     profile_id: str
     date: str  # YYYY-MM-DD
     sub1: Optional[str] = None  # None → берём sub1 профиля
+    cancel_token: str = ""
+
 
 
 class RunNowRequest(BaseModel):
@@ -488,9 +599,9 @@ class RunNowRequest(BaseModel):
 def _profiles_provider() -> List[tuple]:
     """[(profile_id, config, sub1, schedule), ...] для планировщика."""
     out: List[tuple] = []
-    md = read_manifest().get("schedule") or {}
+    md = db.get_default_schedule()
     for pid in list_profile_ids():
-        cfg = _read_profile_safe(pid)
+        cfg = db.get_profile(pid)
         if cfg is None:
             continue
         sub1 = (cfg.get("sub1") or "").strip()
@@ -501,14 +612,13 @@ def _profiles_provider() -> List[tuple]:
 
 scheduler: ReportScheduler = ReportScheduler(
     profiles_provider=_profiles_provider,
-    output_dir=OUTPUT_DIR,
 )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    ensure_profiles_migrated()
-    ensure_profile_schedules_seeded()
+    db.init_db()
+    migrate_files_to_db()
     scheduler.start()
     try:
         yield
@@ -519,12 +629,29 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="sheetsStat", version="0.1.0", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def _no_cache_static(request, call_next):
+    """Статика отдаётся с Cache-Control: no-cache — браузер перепроверяет
+    файл по ETag при каждом запросе (304, дёшево) и после деплоя сразу
+    получает свежие app.js/app.css без Ctrl-F5."""
+    response = await call_next(request)
+    p = request.url.path
+    if p == "/" or p.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True}
 
 
 # ---------- Profiles ----------
+
+# Два бренда на одной таблице — почти всегда ошибка (копия бренда пишет в
+# боевую таблицу оригинала); должно быть громко видно.
+_shared_sheet_brands = db.shared_sheet_brands
+
 
 @app.get("/api/profiles")
 def list_profiles():
@@ -536,7 +663,7 @@ def list_profiles():
     sched_status = scheduler.status().get("profiles", {})
     profiles = []
     for pid in ids:
-        cfg = _read_profile_safe(pid) or {}
+        cfg = db.get_profile(pid) or {}
         st = sched_status.get(pid) or {}
         profiles.append({
             "id": pid,
@@ -545,6 +672,8 @@ def list_profiles():
             "is_active": pid == active,
             "schedule": _effective_schedule(cfg, m.get("schedule") or {}),
             "sheets_enabled": bool((cfg.get("google_sheets") or {}).get("enabled")),
+            "shared_sheet_with": _shared_sheet_brands(
+                pid, (cfg.get("google_sheets") or {}).get("spreadsheet_id") or ""),
             "next_run": st.get("next_run"),
             "last_run": st.get("last_run"),
         })
@@ -602,12 +731,7 @@ def delete_profile(pid: str):
     if len(ids) <= 1:
         raise HTTPException(status_code=400, detail="нельзя удалить последний профиль")
 
-    path = _profile_file(pid)
-    bak = path.with_suffix(".json.bak")
-    if path.exists():
-        path.unlink()
-    if bak.exists():
-        bak.unlink()
+    db.delete_profile(pid)  # runs бренда остаются — история переживает удаление
 
     order = [x for x in m.get("order", []) if x != pid]
     m["order"] = order
@@ -696,6 +820,216 @@ def save_schedule_settings(s: ScheduleGlobal):
     return {"ok": True}
 
 
+@app.get("/api/metrics")
+def get_metrics_registry(profile_id: Optional[str] = None):
+    """Полный семантический реестр метрик (metrics.METRICS) для UI.
+
+    kind: base_service — запрашиваются из сервисов; base_manual — вводятся
+    людьми в таблице (бэкенд читает обратно); computed — считаются по формуле.
+    С `profile_id` подмешиваются per-brand «названия внутри системы»
+    (`google_sheets.metric_names`): поле `system_name` и рендер формул.
+    """
+    import metrics as metrics_mod
+
+    names_override: Dict[str, str] = {}
+    gs_cfg: Dict[str, Any] = {}
+    if profile_id:
+        cfg = db.get_profile(profile_id) or {}
+        gs_cfg = cfg.get("google_sheets") or {}
+        names_override = gs_cfg.get("metric_names") or {}
+    defaults = metrics_mod.default_system_names()
+    disabled_set = set(gs_cfg.get("disabled_metrics") or [])
+    out = [
+        {
+            "key": m.key,
+            "kind": m.kind,
+            "col": m.col,
+            "optional": m.key in metrics_mod.OPTIONAL_METRICS,
+            "disabled": m.key in disabled_set,
+            "label": m.label,
+            "system_name": (names_override.get(m.key) or "").strip()
+                           or defaults.get(m.key, m.key),
+            "system_name_default": defaults.get(m.key, m.key),
+            "occurrence": m.occurrence,
+            "source": m.source,
+            "formula": metrics_mod.human_formula(m.key, names_override),
+            "expr": m.expr,
+            "description": m.description,
+        }
+        for m in metrics_mod.METRICS.values()
+        if m.kind != "date"
+    ]
+    if profile_id:
+        # динамические ручные поля расходов бренда (кабинетная зона, коэф 1)
+        from sheets_writer import manual_cabinet_entries
+        for e in manual_cabinet_entries(gs_cfg):
+            out.append({
+                "key": f"manual_cabinet:{e['label']}",
+                "kind": "manual_cabinet",
+                "col": None,
+                "label": e["label"],
+                "system_name": e["name"],
+                "system_name_default": e["label"],
+                "occurrence": 1,
+                "source": None,
+                "formula": None,
+                "expr": None,
+                "target": e["target"],
+                "description": ("Ручное доходное поле — суммируется в «Приход»"
+                                if e["target"] == "prihod"
+                                else "Ручное поле расходов — суммируется в «Затраты» (коэф 1)"),
+            })
+    return {"metrics": out}
+
+
+@app.get("/api/sheets/columns")
+def get_sheets_columns():
+    """Legacy-алиас: 12 записываемых колонок (совместимость старого UI)."""
+    from sheets_writer import AGG_COLUMNS, AGG_COLUMN_DESCRIPTIONS
+    return {
+        "columns": [
+            {
+                "key": key,
+                "label": label,
+                "occurrence": occurrence,
+                "legacy_col": legacy_col,
+                "description": AGG_COLUMN_DESCRIPTIONS.get(key, ""),
+            }
+            for key, (label, occurrence, legacy_col) in AGG_COLUMNS.items()
+        ]
+    }
+
+
+class SheetsCreateRequest(BaseModel):
+    force: bool = False  # создать, даже если spreadsheet_id уже заполнен
+
+
+@app.post("/api/profiles/{pid}/sheets/create")
+def create_profile_spreadsheet(pid: str, req: Optional[SheetsCreateRequest] = None):
+    """Создаёт таблицу бренда с нуля из реестра метрик и прописывает её id."""
+    import gspread
+    import sheet_builder
+
+    cfg = read_profile(pid)
+    gs_cfg = cfg.get("google_sheets") or {}
+    if gs_cfg.get("spreadsheet_id") and not (req and req.force):
+        raise HTTPException(
+            status_code=400,
+            detail="у бренда уже есть spreadsheet_id — очисти его или передай force",
+        )
+    sa_path = gs_cfg.get("service_account_json_path") or "cfg/service_account.json"
+    try:
+        gc = gspread.service_account(filename=sa_path)
+        result = sheet_builder.create_brand_spreadsheet(cfg, cfg.get("name") or pid, gc)
+    except Exception as e:
+        logger.error("sheets/create %r: %s", pid, e, exc_info=True)
+        if "storage quota" in str(e).lower():
+            sa_email = ""
+            try:
+                sa_email = json.loads(Path(sa_path).read_text())["client_email"]
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail=(
+                "у сервисного аккаунта Google нулевая квота Drive — он не может "
+                "создавать файлы. Создай пустую таблицу в своём Google Drive, "
+                f"дай доступ редактора {sa_email or 'сервисному аккаунту'}, вставь "
+                "ссылку в поле Spreadsheet ID и нажми «Разметить таблицу»"
+            ))
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    # созданная таблица — managed: формулы из реестра, вкладки автосоздаются
+    cfg["google_sheets"]["spreadsheet_id"] = result["spreadsheet_id"]
+    cfg["google_sheets"]["managed_formulas"] = True
+    cfg["google_sheets"]["auto_create_tab"] = True
+    write_profile(pid, cfg)
+    logger.info("Профиль %r: создана таблица %s", pid, result["spreadsheet_id"])
+    return result
+
+
+class SheetsInitRequest(BaseModel):
+    # Ссылка/ID из поля формы: сохраняется в конфиг ДО разметки, чтобы кнопка
+    # работала без отдельного «Сохранить настройки» (и размечалась именно
+    # вставленная таблица, а не старая из БД).
+    spreadsheet_id: str = ""
+
+
+@app.post("/api/profiles/{pid}/sheets/init")
+def init_profile_spreadsheet(pid: str, req: Optional[SheetsInitRequest] = None):
+    """Размечает таблицу бренда: создаёт вкладку текущего месяца со всеми
+    колонками/формулами/датами из реестра метрик и включает managed-режим.
+    Путь для пустой таблицы, созданной пользователем и расшаренной на
+    сервисный аккаунт (сам аккаунт файлы создавать не может — нулевая квота
+    Drive). `spreadsheet_id` в теле (ссылка или ID) сохраняется в конфиг."""
+    import gspread
+    from datetime import date as _date
+
+    import sheet_builder
+
+    cfg = read_profile(pid)
+    gs_cfg = cfg.setdefault("google_sheets", {})
+    incoming = _extract_spreadsheet_id((req.spreadsheet_id if req else "") or "")
+    if incoming:
+        gs_cfg["spreadsheet_id"] = incoming
+    if not gs_cfg.get("spreadsheet_id"):
+        raise HTTPException(status_code=400, detail="сначала укажи Spreadsheet ID")
+    try:
+        gc = gspread.service_account(
+            filename=gs_cfg.get("service_account_json_path") or "cfg/service_account.json")
+        sh = gc.open_by_key(gs_cfg["spreadsheet_id"])
+        ws, created = sheet_builder.ensure_month_worksheet(sh, _date.today(), cfg)
+    except Exception as e:
+        logger.error("sheets/init %r: %s", pid, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    cfg["google_sheets"]["managed_formulas"] = True
+    cfg["google_sheets"]["auto_create_tab"] = True
+    write_profile(pid, cfg)
+    logger.info("Профиль %r: таблица размечена (вкладка %r, created=%s)",
+                pid, ws.title, created)
+    return {
+        "worksheet": ws.title,
+        "created": created,
+        "url": f"https://docs.google.com/spreadsheets/d/{gs_cfg['spreadsheet_id']}/edit",
+    }
+
+
+class VerifyRequest(BaseModel):
+    profile_id: str
+    tabs: List[str] = []
+
+
+@app.post("/api/sheets/verify")
+def verify_sheets(req: VerifyRequest):
+    """Сверка бэкенд-формул реестра с фактическими значениями листа."""
+    import gspread
+    from datetime import date as _date
+
+    import verify as verify_mod
+    from sheets_writer import RU_MONTHS
+
+    cfg = read_profile(req.profile_id)
+    gs_cfg = cfg.get("google_sheets") or {}
+    if not gs_cfg.get("spreadsheet_id"):
+        raise HTTPException(status_code=400, detail="у бренда нет spreadsheet_id")
+    tabs = req.tabs or [f"{RU_MONTHS[_date.today().month - 1]} {_date.today().year % 100:02d}"]
+    try:
+        gc = gspread.service_account(
+            filename=gs_cfg.get("service_account_json_path") or "cfg/service_account.json")
+        sh = gc.open_by_key(gs_cfg["spreadsheet_id"])
+        results = []
+        for tab in tabs:
+            try:
+                ws = sh.worksheet(tab)
+            except Exception:
+                results.append({"worksheet": tab, "error": "вкладка не найдена"})
+                continue
+            results.append(verify_mod.verify_worksheet(ws, cfg))
+        return {"results": results}
+    except Exception as e:
+        logger.error("sheets/verify %r: %s", req.profile_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
 @app.get("/api/schedule")
 def get_schedule():
     return scheduler.status()
@@ -705,6 +1039,21 @@ def get_schedule():
 async def schedule_run_now(req: Optional[RunNowRequest] = None):
     pid = (req.profile_id if req else None) or None
     return await scheduler.trigger_now(pid)
+
+
+class CancelRequest(BaseModel):
+    cancel_token: str
+
+
+@app.post("/api/report/cancel")
+def cancel_report(req: CancelRequest):
+    """Отменяет активный ручной прогон: сборка обрывается между стадиями,
+    день не записывается ни в БД, ни в Sheets."""
+    token = (req.cancel_token or "").strip()
+    if token in _CANCEL_TOKENS:
+        _CANCEL_TOKENS[token] = True
+        return {"ok": True}
+    return {"ok": False, "detail": "нет активного прогона с таким токеном"}
 
 
 @app.post("/api/report")
@@ -717,10 +1066,35 @@ def run_report(req: ReportRequest):
     config = read_profile(req.profile_id)  # 404 если профиля нет
     sub1 = (req.sub1 or "").strip() or (config.get("sub1") or "").strip()
 
+    token = (req.cancel_token or "").strip()
+    cancel_check = None
+    if token:
+        _CANCEL_TOKENS[token] = False
+
+        def cancel_check():
+            if _CANCEL_TOKENS.get(token):
+                raise ReportCancelled()
+
+    started_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
     try:
-        report = build_report(config, day, sub1)
+        report = build_report(config, day, sub1, cancel_check=cancel_check)
+    except ReportCancelled:
+        _CANCEL_TOKENS.pop(token, None)
+        logger.info("Report %s/%s отменён пользователем — ничего не записано",
+                    req.profile_id, req.date)
+        return {"cancelled": True, "date": req.date, "profile_id": req.profile_id}
     except Exception as e:
         logger.error("Report error: %s", e, exc_info=True)
+        # Упавший ручной прогон тоже попадает в историю/last_run;
+        # report=None не затирает последний удачный отчёт за эту дату.
+        db.save_run(
+            req.profile_id, day.isoformat(), sub1,
+            ok=False, trigger="manual", error=f"{type(e).__name__}: {e}",
+            started_at=started_at,
+            finished_at=datetime.now(SAMARA_TZ).isoformat(timespec="seconds"),
+            report=None,
+        )
+        _CANCEL_TOKENS.pop(token, None)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
     # Если Ads Manager вернул 0 кабинетов — это warning, но ответ всё равно
@@ -732,35 +1106,49 @@ def run_report(req: ReportRequest):
         else:
             report["warning"] = f"Нет кабинетов с label={sub1!r} у пользователя Ads Manager."
 
-    # Сохраняем в output/ (profile_id в имени — sub1 у профилей может совпадать)
-    out_file = OUTPUT_DIR / f"{day.isoformat()}_{sub1}__{req.profile_id}.json"
-    out_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    report["_saved_to"] = out_file.name
+    # Общая таблица с другим брендом — почти всегда ошибка конфигурации
+    shared = _shared_sheet_brands(
+        req.profile_id, (config.get("google_sheets") or {}).get("spreadsheet_id") or "")
+    if shared:
+        gs = report.get("google_sheets")
+        msg = f"эту таблицу также использует бренд: {', '.join(shared)} — проверь spreadsheet_id"
+        if isinstance(gs, dict):
+            gs.setdefault("header_warnings", []).append(msg)
+        report["warning"] = (report.get("warning") + " · " if report.get("warning") else "") + msg
+
+    # Сохраняем в БД: upsert по (profile_id, date) — повторный прогон
+    # перезаписывает запись (sub1 у профилей может совпадать, ключ — по pid).
+    db.save_run(
+        req.profile_id, day.isoformat(), sub1,
+        ok=True, trigger="manual",
+        google_sheets_error=(report.get("google_sheets") or {}).get("error"),
+        cabinet_count=report.get("cabinet_count"),
+        started_at=started_at,
+        finished_at=datetime.now(SAMARA_TZ).isoformat(timespec="seconds"),
+        report=report,
+    )
+    report["_saved"] = {"profile_id": req.profile_id, "date": day.isoformat()}
+    _CANCEL_TOKENS.pop(token, None)
 
     return report
 
 
 @app.get("/api/reports")
-def list_reports():
-    items = []
-    for p in sorted(OUTPUT_DIR.glob("*.json"), reverse=True):
-        items.append({
-            "name": p.name,
-            "size": p.stat().st_size,
-            "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds"),
-        })
-    return {"items": items}
+def list_reports(profile_id: Optional[str] = None):
+    return {"items": db.list_runs(profile_id=profile_id or None)}
 
 
-@app.get("/api/reports/{name}")
-def get_report(name: str):
-    # Защита: только *.json из output/, без path traversal
-    if "/" in name or "\\" in name or not name.endswith(".json"):
-        raise HTTPException(status_code=400, detail="bad filename")
-    p = OUTPUT_DIR / name
-    if not p.exists() or not p.is_file():
+@app.get("/api/reports/{pid}/{run_date}")
+def get_report(pid: str, run_date: str):
+    _validate_pid(pid)
+    try:
+        datetime.strptime(run_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="дата должна быть YYYY-MM-DD")
+    report = db.get_run_report(pid, run_date)
+    if report is None:
         raise HTTPException(status_code=404, detail="report not found")
-    return json.loads(p.read_text(encoding="utf-8"))
+    return report
 
 
 # ---------- Static (должен идти ПОСЛЕ api-routes) ----------

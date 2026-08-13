@@ -5,6 +5,7 @@ function activateTab(name) {
   document.getElementById(`tab-${name}`).classList.add("active");
   if (name === "overview") renderOverview();
   if (name === "settings") loadConfig();
+  if (name === "columns") loadColumnsTab();
   if (name === "history") loadHistory();
 }
 
@@ -111,7 +112,10 @@ function renderOverview() {
     tr.innerHTML = `
       <td><button class="link-btn" data-open="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</button></td>
       <td>${p.sub1 ? escapeHtml(p.sub1) : '<span class="muted">—</span>'}</td>
-      <td>${p.sheets_enabled ? '<span class="dot dot-sheets"></span>' : '<span class="muted">—</span>'}</td>
+      <td>${p.sheets_enabled ? '<span class="dot dot-sheets"></span>' : '<span class="muted">—</span>'}${
+        (p.shared_sheet_with || []).length
+          ? ` <span class="status err" style="margin:0; font-size:11px;" title="Эту же таблицу использует: ${escapeHtml(p.shared_sheet_with.join(", "))}">⚠ общая</span>`
+          : ""}</td>
       <td><label class="switch"><input type="checkbox" ${sched.enabled ? "checked" : ""} data-toggle="${escapeHtml(p.id)}"><span class="slider"></span></label></td>
       <td><input type="text" class="time-input" value="${escapeHtml(sched.time || "09:00")}" data-time="${escapeHtml(p.id)}"></td>
       <td class="nowrap">${fmtNextRun(p.next_run)}</td>
@@ -179,7 +183,7 @@ async function runBrandNow(pid) {
     if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
     const res = (data.results || [])[0] || {};
     if (res.ok) {
-      status.textContent = `✅ «${p ? p.name : pid}» (${data.date}): ${res.saved_to || "ok"}${res.google_sheets_error ? ` · Sheets: ${res.google_sheets_error}` : ""}`;
+      status.textContent = `✅ «${p ? p.name : pid}» (${data.date}): ${res.ok ? "ok" : "ошибка"}${res.google_sheets_error ? ` · Sheets: ${res.google_sheets_error}` : ""}`;
       status.className = res.google_sheets_error ? "status err" : "status ok";
     } else {
       status.textContent = `❌ «${p ? p.name : pid}»: ${res.error || data.error || "ошибка"}`;
@@ -255,6 +259,7 @@ async function activateProfile(id) {
   renderActiveBrandLabel();
   prefillReportSub1();
   if (document.getElementById("tab-settings").classList.contains("active")) loadConfig();
+  if (document.getElementById("tab-columns").classList.contains("active")) loadColumnsTab();
 }
 
 // ---------- CRUD брендов (действия адресуются конкретному pid) ----------
@@ -414,24 +419,54 @@ document.getElementById("report-form").addEventListener("submit", async (ev) => 
     return;
   }
 
-  status.textContent = "Считаю… это может занять 10–30 секунд.";
+  const submitBtn = ev.target.querySelector("button[type=submit]");
+  status.textContent = `Считаю отчёт за ${date}… (обычно 10–60 секунд)`;
   status.className = "status";
   result.classList.add("hidden");
+  if (submitBtn) submitBtn.disabled = true;
+
+  // прогресс-бар в «бегущем» режиме + серверная отмена по токену
+  const progress = document.getElementById("range-progress");
+  const bar = document.getElementById("range-bar");
+  const cancelBtn = document.getElementById("range-cancel");
+  progress.classList.remove("hidden");
+  document.getElementById("range-counter").textContent = "1 день";
+  document.getElementById("range-days").style.display = "none";
+  document.getElementById("range-status").textContent = "";
+  bar.classList.add("indeterminate");
+  _rangeCancel = false;
+  cancelBtn.disabled = false;
+  const token = _newCancelToken();
+  _currentCancelToken = token;
 
   try {
     const r = await fetch("/api/report", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: _activeProfileId, date, sub1 }),
+      body: JSON.stringify({ profile_id: _activeProfileId, date, sub1, cancel_token: token }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    renderReport(data);
-    status.textContent = data._saved_to ? `✅ Сохранено в output/${data._saved_to}` : (data.warning || "Готово");
-    status.className = data.warning ? "status err" : "status ok";
+    if (data.cancelled) {
+      status.textContent = `⏹ Отменено — день ${date} не записан`;
+      status.className = "status err";
+    } else {
+      renderReport(data);
+      status.textContent = data._saved ? `✅ Сохранено (${data._saved.date})` : "Готово";
+      status.className = "status ok";
+    }
   } catch (e) {
     status.textContent = "❌ " + e.message;
     status.className = "status err";
+  } finally {
+    _currentCancelToken = null;
+    if (submitBtn) submitBtn.disabled = false;
+    bar.classList.remove("indeterminate");
+    bar.style.width = "100%";
+    setTimeout(() => { progress.classList.add("hidden"); bar.style.width = "0%"; }, 600);
+    document.getElementById("range-days").style.display = "";
+    cancelBtn.disabled = false;
+    document.getElementById("range-status").textContent = "";
   }
 });
 
@@ -447,16 +482,73 @@ function enumerateDates(startIso, endIso) {
   return out;
 }
 
+let _rangeCancel = false;
+let _currentCancelToken = null;  // токен текущего серверного прогона
+
+function _newCancelToken() {
+  return (crypto.randomUUID ? crypto.randomUUID() : `t${Date.now()}${Math.random()}`);
+}
+
+document.getElementById("range-cancel").addEventListener("click", async () => {
+  _rangeCancel = true;
+  const rangeStatus = document.getElementById("range-status");
+  rangeStatus.textContent = "Останавливаю — текущий день отменяется и не записывается…";
+  rangeStatus.className = "status";
+  document.getElementById("range-cancel").disabled = true;
+  if (_currentCancelToken) {
+    try {
+      await fetch("/api/report/cancel", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancel_token: _currentCancelToken }),
+      });
+    } catch {}
+  }
+});
+
+function _rangeDayRow(date) {
+  const tr = document.createElement("tr");
+  tr.className = "current";
+  tr.innerHTML = `<td>${escapeHtml(date)}</td>
+    <td class="status" style="margin:0;">считаю…</td><td>—</td><td></td>`;
+  const tbody = document.querySelector("#range-days tbody");
+  tbody.appendChild(tr);
+  tr.scrollIntoView({ block: "nearest" });
+  return tr;
+}
+
+function _rangeDayDone(tr, data, err) {
+  tr.classList.remove("current");
+  const cells = tr.children;
+  if (err) {
+    cells[1].innerHTML = `<span class="status err" style="margin:0;">❌ ${escapeHtml(err)}</span>`;
+    return;
+  }
+  cells[1].innerHTML = `<span class="status ok" style="margin:0;">✅ ок</span>`;
+  const gs = data.google_sheets || {};
+  cells[2].textContent = gs.error
+    ? `❌ ${gs.error}`
+    : (gs.enabled === false ? "выкл" :
+       `стр. ${gs.date_row} · ${(gs.matched || []).length}/${(gs.unmatched || []).length}`);
+  const warns = reportSourceErrors(data).concat(gs.header_warnings || []);
+  if (data.warning) warns.unshift(data.warning);
+  if (warns.length) {
+    cells[3].innerHTML = `<span title="${escapeHtml(warns.join("\\n"))}" style="cursor:help;">⚠</span>`;
+  }
+}
+
 document.getElementById("report-range-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const start = document.getElementById("report-start").value;
   const end = document.getElementById("report-end").value;
   const sub1 = document.getElementById("report-range-sub1").value.trim();
   const btn = document.getElementById("report-range-submit");
+  const dayBtn = document.querySelector("#report-form button[type=submit]");
   const status = document.getElementById("report-status");
   const progress = document.getElementById("range-progress");
   const rangeStatus = document.getElementById("range-status");
-  const rangeLog = document.getElementById("range-log");
+  const bar = document.getElementById("range-bar");
+  const counter = document.getElementById("range-counter");
+  const cancelBtn = document.getElementById("range-cancel");
   const result = document.getElementById("report-result");
 
   if (!_activeProfileId) {
@@ -479,47 +571,67 @@ document.getElementById("report-range-form").addEventListener("submit", async (e
   status.className = "status";
   result.classList.add("hidden");
   progress.classList.remove("hidden");
-  rangeLog.innerHTML = "";
+  document.querySelector("#range-days tbody").innerHTML = "";
+  bar.style.width = "0%";
+  counter.textContent = `0 / ${dates.length}`;
+  _rangeCancel = false;
+  cancelBtn.disabled = false;
   btn.disabled = true;
+  if (dayBtn) dayBtn.disabled = true;
 
   let lastData = null;
-  let stopped = false;
+  let okCount = 0;
+  let errCount = 0;
+  let cancelled = false;
   try {
     for (let i = 0; i < dates.length; i++) {
+      if (_rangeCancel) { cancelled = true; break; }
       const date = dates[i];
-      rangeStatus.textContent = `День ${i + 1} из ${dates.length}: ${date}…`;
+      rangeStatus.textContent = `Считаю ${date} (${i + 1} из ${dates.length})…`;
       rangeStatus.className = "status";
+      const tr = _rangeDayRow(date);
+      const token = _newCancelToken();
+      _currentCancelToken = token;
       try {
         const r = await fetch("/api/report", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ profile_id: _activeProfileId, date, sub1 }),
+          body: JSON.stringify({ profile_id: _activeProfileId, date, sub1, cancel_token: token }),
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.detail || r.statusText);
-        const gsErr = data.google_sheets && data.google_sheets.error;
-        if (gsErr) throw new Error(`Sheets: ${gsErr}`);
-        lastData = data;
-        const warns = reportSourceErrors(data);
-        if (warns.length) {
-          appendRangeLine(rangeLog, `⚠️ ${date}: ${warns.join(" | ")}`, "warn");
-        } else {
-          appendRangeLine(rangeLog, `✅ ${date}`, "ok");
+        if (data.cancelled) {
+          tr.classList.remove("current");
+          tr.children[1].innerHTML = `<span class="status err" style="margin:0;">⏹ отменён, не записан</span>`;
+          cancelled = true;
+          break;
         }
+        lastData = data;
+        _rangeDayDone(tr, data, null);
+        okCount++;
       } catch (e) {
-        appendRangeLine(rangeLog, `❌ ${date}: ${e.message}`, "err");
-        rangeStatus.textContent = `❌ Остановлено на ${date} (${i + 1} из ${dates.length})`;
-        rangeStatus.className = "status err";
-        stopped = true;
-        break;
+        _rangeDayDone(tr, null, e.message);
+        errCount++;
+      } finally {
+        _currentCancelToken = null;
       }
+      bar.style.width = `${Math.round(((i + 1) / dates.length) * 100)}%`;
+      counter.textContent = `${i + 1} / ${dates.length}`;
     }
-    if (!stopped) {
-      rangeStatus.textContent = `✅ Готово: ${dates.length} дн.`;
-      rangeStatus.className = "status ok";
+    if (cancelled) {
+      rangeStatus.textContent = `⏹ Отменено: успело ${okCount + errCount} из ${dates.length}`
+        + (errCount ? ` (ошибок: ${errCount})` : "");
+      rangeStatus.className = "status err";
+    } else {
+      rangeStatus.textContent = errCount
+        ? `Готово: ${okCount} ок, ${errCount} с ошибками`
+        : `✅ Готово: ${okCount} дн.`;
+      rangeStatus.className = errCount ? "status err" : "status ok";
     }
   } finally {
     btn.disabled = false;
+    if (dayBtn) dayBtn.disabled = false;
+    cancelBtn.disabled = false;
   }
 
   if (lastData) renderReport(lastData);
@@ -540,64 +652,88 @@ function reportSourceErrors(data) {
   return msgs;
 }
 
-function appendRangeLine(container, text, cls) {
-  const line = document.createElement("div");
-  line.className = "range-line " + (cls || "");
-  line.textContent = text;
-  container.appendChild(line);
-  container.scrollTop = container.scrollHeight;
+function _fillCabinetTable(tableId, cabinets) {
+  const table = document.getElementById(tableId);
+  const tbody = table.querySelector("tbody");
+  tbody.innerHTML = "";
+  table.classList.remove("show-zeros");
+  const entries = Object.entries(cabinets || {})
+    .map(([n, v]) => [n, Number(v || 0)])
+    .sort((a, b) => b[1] - a[1]);
+  entries.forEach(([name, spent]) => {
+    const tr = document.createElement("tr");
+    if (!spent) tr.className = "zero-row";
+    tr.innerHTML = `<td>${escapeHtml(name)}</td><td class="num">${fmtMoney(spent)}</td>`;
+    tbody.appendChild(tr);
+  });
+  const zeros = entries.filter(e => !e[1]).length;
+  if (zeros) {
+    const tr = document.createElement("tr");
+    tr.className = "zero-toggle";
+    tr.innerHTML = `<td colspan="2">ещё ${zeros} с нулевым расходом — показать</td>`;
+    tr.addEventListener("click", () => {
+      const shown = table.classList.toggle("show-zeros");
+      tr.querySelector("td").textContent = shown
+        ? "скрыть нулевые" : `ещё ${zeros} с нулевым расходом — показать`;
+    });
+    tbody.appendChild(tr);
+  }
+  return entries.length;
 }
 
 function renderReport(data) {
   const result = document.getElementById("report-result");
   result.classList.remove("hidden");
 
-  document.getElementById("report-summary").innerHTML =
-    `<div style="color: var(--muted); font-size: 13px;">
-      ${data.date} · sub1=<b>${data.sub1}</b> · кабинетов: <b>${data.cabinet_count}</b>
-      ${data.warning ? `<br><span class="status err">${data.warning}</span>` : ""}
-    </div>`;
-
-  const gs = data.google_sheets;
-  const gsEl = document.getElementById("report-gs");
-  if (!gs || gs.enabled === false) {
-    gsEl.textContent = "";
-    gsEl.className = "status";
+  // Шапка одной строкой: дата · sub1 · кабинеты · чип Sheets
+  const gs = data.google_sheets || {};
+  let gsChip = "";
+  if (gs.enabled === false || !data.google_sheets) {
+    gsChip = `<span class="chip">Sheets выкл</span>`;
   } else if (gs.error) {
-    gsEl.textContent = `Google Sheets: ❌ ${gs.error}`;
-    gsEl.className = "status err";
+    gsChip = `<span class="chip err">Sheets: ${escapeHtml(gs.error)}</span>`;
   } else {
-    const nMatched = (gs.matched || []).length;
-    const nUnmatched = (gs.unmatched || []).length;
-    gsEl.textContent = `Google Sheets ✅ «${gs.worksheet}», строка ${gs.date_row} · matched ${nMatched}, unmatched ${nUnmatched}`;
-    gsEl.className = "status ok";
+    gsChip = `<span class="chip ok">Sheets ✓ «${escapeHtml(gs.worksheet || "")}» стр. ${gs.date_row}
+      · ${(gs.matched || []).length} записано${(gs.unmatched || []).length ? ` · ${(gs.unmatched || []).length} мимо` : ""}</span>`;
   }
+  document.getElementById("report-head").innerHTML =
+    `<b>${escapeHtml(data.date || "")}</b>
+     <span>sub1 <b>${escapeHtml(data.sub1 || "")}</b></span>
+     <span>кабинетов <b>${data.cabinet_count ?? 0}</b></span>
+     ${gsChip}`;
 
-  // Ads Manager table
-  const tbody = document.querySelector("#cabinets-table tbody");
-  tbody.innerHTML = "";
+  // Предупреждения — списком, каждое с новой строки
+  const meta = data.metrics_meta || {};
+  const warns = [];
+  if (data.warning) warns.push(data.warning);
+  (gs.header_warnings || []).forEach(w => warns.push("шапка листа: " + w));
+  if ((meta.assumed_zero || []).length)
+    warns.push("ручные поля без значения, посчитаны как 0: " + meta.assumed_zero.join(", "));
+  (meta.coeff_warnings || []).forEach(w => warns.push(w));
+  reportSourceErrors(data).forEach(w => warns.push(w));
+  document.getElementById("report-warnings").innerHTML =
+    warns.map(w => `<div class="warn-line">${escapeHtml(w)}</div>`).join("");
+
+  renderReportMetrics(data);
+
+  // Ads Manager / Yandex: сортировка по расходу, нули спрятаны
   const ads = data.ads_manager || { cabinets: {}, total: 0 };
-  Object.entries(ads.cabinets || {}).forEach(([name, spent]) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(name)}</td><td class="num">${fmtMoney(spent)}</td>`;
-    tbody.appendChild(tr);
-  });
+  const adsCount = _fillCabinetTable("cabinets-table", ads.cabinets);
   document.getElementById("ads-total").textContent = fmtMoney(ads.total);
+  document.getElementById("ads-info").textContent =
+    `· ${adsCount} кабинетов · ${fmtMoney(ads.total)}`;
 
-  // Yandex Direct table
-  const yxTbody = document.querySelector("#yandex-table tbody");
-  yxTbody.innerHTML = "";
   const yx = data.yandex || { cabinets: {}, total: 0 };
-  Object.entries(yx.cabinets || {}).forEach(([name, spent]) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(name)}</td><td class="num">${fmtMoney(spent)}</td>`;
-    yxTbody.appendChild(tr);
-  });
+  const yxCount = _fillCabinetTable("yandex-table", yx.cabinets);
   document.getElementById("yandex-total").textContent = fmtMoney(yx.total);
+  document.getElementById("yx-info").textContent =
+    `· ${yxCount} кабинетов · ${fmtMoney(yx.total)}`;
 
   // Yandex Metrika
   const ym = data.yandex_metrika || {};
   const fmtInt = (v) => (v ?? 0).toLocaleString("ru-RU");
+  document.getElementById("ym-info").textContent =
+    `· визиты ${fmtInt(ym.visits)} · просмотры ${fmtInt(ym.pageviews)}`;
   document.getElementById("ym-visits-total").textContent = fmtInt(ym.visits);
   document.getElementById("ym-pageviews-total").textContent = fmtInt(ym.pageviews);
   document.getElementById("ym-users-total").textContent = fmtInt(ym.users);
@@ -626,6 +762,8 @@ function renderReport(data) {
 
   // LeadsTech
   const lt = data.leadstech || {};
+  document.getElementById("lt-info").textContent =
+    `· клики ${(lt.clicks ?? 0).toLocaleString("ru-RU")} · сумма ${fmtMoney(lt.sum)}`;
   document.getElementById("lt-clicks").textContent = (lt.clicks ?? 0).toLocaleString("ru-RU");
   document.getElementById("lt-hosts").textContent = (lt.hosts ?? 0).toLocaleString("ru-RU");
   document.getElementById("lt-sum").textContent = fmtMoney(lt.sum);
@@ -664,6 +802,8 @@ function renderReport(data) {
 
   // 8connect
   const ec = data.eightconnect || {};
+  document.getElementById("ec-info").textContent =
+    `· расход ${fmtMoney(ec.cost)} · доход ${fmtMoney(ec.charge)}`;
   document.getElementById("ec-cost").textContent = fmtMoney(ec.cost);
   document.getElementById("ec-charge").textContent = fmtMoney(ec.charge);
   const ecSchemes = Array.isArray(ec.scheme_ids) ? ec.scheme_ids : [];
@@ -673,6 +813,26 @@ function renderReport(data) {
   ecErrEl.textContent = ecErr ? `❌ ${ecErr}` : "";
 
   document.getElementById("report-raw").textContent = JSON.stringify(data, null, 2);
+
+  // Секции с ошибками источника раскрываются сами и помечаются
+  const errMap = {
+    "sec-ads": (data.ads_manager || {}).errors,
+    "sec-yx": (data.yandex || {}).errors,
+    "sec-ym": (data.yandex_metrika || {}).errors,
+    "sec-lt": (data.leadstech || {}).errors,
+    "sec-ec": (data.eightconnect || {}).errors,
+  };
+  for (const [secId, errs] of Object.entries(errMap)) {
+    const sec = document.getElementById(secId);
+    if (!sec) continue;
+    const hasErr = Array.isArray(errs) && errs.length > 0;
+    sec.open = hasErr;
+    sec.querySelector("summary").classList.toggle("has-error", hasErr);
+    if (hasErr) {
+      const info = sec.querySelector(".sec-info");
+      if (info) info.textContent += " · ⚠ ошибка источника";
+    }
+  }
 }
 
 function fmtMoney(v) {
@@ -839,7 +999,7 @@ function renderBrandScheduleInfo() {
   if (p.last_run) {
     const lr = p.last_run;
     txt += lr.ok
-      ? ` · последний: ${lastRunWhen(lr)} → ${lr.saved_to || "ok"}`
+      ? ` · последний: ${lastRunWhen(lr)} → ${lr.ok ? "ok" : "ошибка"}`
       : ` · последний упал: ${lastRunWhen(lr)} (${lr.error || "см. логи"})`;
   }
   el.textContent = txt;
@@ -887,7 +1047,7 @@ document.getElementById("brand-sched-run").addEventListener("click", async () =>
     if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
     const res = (data.results || [])[0] || {};
     status.textContent = res.ok
-      ? `✅ ${data.date}: ${res.saved_to || "ok"}${res.google_sheets_error ? ` · Sheets: ${res.google_sheets_error}` : ""}`
+      ? `✅ ${data.date}: ${res.ok ? "ok" : "ошибка"}${res.google_sheets_error ? ` · Sheets: ${res.google_sheets_error}` : ""}`
       : `❌ ${res.error || "ошибка"}`;
     status.className = (res.ok && !res.google_sheets_error) ? "status ok" : "status err";
     await loadProfiles();
@@ -969,6 +1129,19 @@ document.getElementById("save-config").addEventListener("click", async () => {
       enabled: document.getElementById("gs-enabled").checked,
       spreadsheet_id: extractSpreadsheetId(document.getElementById("gs-spreadsheet-id").value),
       service_account_json_path: _cfgState?.google_sheets?.service_account_json_path || "cfg/service_account.json",
+      // поля ниже правятся в JSON профиля / другими экранами — пробрасываем,
+      // чтобы сохранение настроек их не затёрло
+      column_labels: _cfgState?.google_sheets?.column_labels || {},
+      metric_names: _cfgState?.google_sheets?.metric_names || {},
+      disabled_metrics: _cfgState?.google_sheets?.disabled_metrics || [],
+      managed_formulas: !!_cfgState?.google_sheets?.managed_formulas,
+      auto_create_tab: !!_cfgState?.google_sheets?.auto_create_tab,
+      cabinet_coeffs: _cfgState?.google_sheets?.cabinet_coeffs || {},
+      manual_cabinets: _cfgState?.google_sheets?.manual_cabinets || [],
+      cabinets: _cfgState?.google_sheets?.cabinets || [],
+      share_with: _cfgState?.google_sheets?.share_with || [],
+      cabinet_start_col: _cfgState?.google_sheets?.cabinet_start_col || "",
+      cabinet_max_col: _cfgState?.google_sheets?.cabinet_max_col || "",
     },
     // расписание включаем в payload, чтобы сохранение настроек его не затёрло
     schedule: {
@@ -999,6 +1172,308 @@ document.getElementById("save-config").addEventListener("click", async () => {
   }
 });
 
+// ---------- Вычисленные метрики в отчёте ----------
+async function renderReportMetrics(data) {
+  const el = document.getElementById("report-metrics");
+  if (!el) return;
+  const m = data.metrics;
+  if (!m) { el.innerHTML = ""; return; }
+  // схема per-brand: системные имена активного бренда
+  let schema = _columnsSchema;
+  try {
+    const rr = await fetch(`/api/metrics${_activeProfileId ? `?profile_id=${encodeURIComponent(_activeProfileId)}` : ""}`);
+    schema = (await rr.json()).metrics || schema || [];
+  } catch { schema = schema || []; }
+  const meta = data.metrics_meta || {};
+  const manualVals = meta.manual_cabinets || {};
+  const fmt = v => v === null || v === undefined ? "—"
+    : (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString("ru-RU") : (+v.toFixed(2)).toLocaleString("ru-RU"));
+  const cells = (schema || [])
+    .filter(c => !c.disabled)
+    .filter(c => (c.kind !== "date" && c.key in m) || c.kind === "manual_cabinet")
+    .map(c => {
+      const v = c.kind === "manual_cabinet" ? manualVals[c.label] : m[c.key];
+      const nm = c.system_name || c.label || c.key;
+      const empty = v === null || v === undefined;
+      return `<div class="metric-cell">
+        <div class="m-name" title="${escapeHtml(nm)}">${escapeHtml(nm)}</div>
+        <div class="m-value${empty ? " empty" : ""}">${fmt(v)}</div></div>`;
+    })
+    .join("");
+  el.innerHTML = `<details class="src" open><summary>Метрики (бэкенд)</summary>
+    <div class="metric-grid">${cells}</div></details>`;
+}
+
+// ---------- Создание/разметка таблицы ----------
+// Пустой Spreadsheet ID → попытка создать файл (у сервисного аккаунта обычно
+// нулевая квота Drive — бэкенд вернёт понятную инструкцию). Заполненный →
+// разметка: вкладка текущего месяца со всеми колонками/формулами из реестра.
+document.getElementById("gs-create").addEventListener("click", async () => {
+  const status = document.getElementById("gs-create-status");
+  if (!_activeProfileId) { status.textContent = "❌ Не выбран бренд."; status.className = "status err"; return; }
+  const existing = extractSpreadsheetId(document.getElementById("gs-spreadsheet-id").value.trim());
+  if (existing && !confirm("Разметить таблицу: создать вкладку текущего месяца со всеми колонками и формулами и включить managed-режим (формулы будут переписываться при каждом прогоне)?")) return;
+  status.textContent = existing ? "Размечаю таблицу…" : "Создаю таблицу…";
+  status.className = "status";
+  try {
+    const url = existing
+      ? `/api/profiles/${encodeURIComponent(_activeProfileId)}/sheets/init`
+      : `/api/profiles/${encodeURIComponent(_activeProfileId)}/sheets/create`;
+    const r = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      // init: вставленная в поле ссылка сохраняется в конфиг и размечается
+      // именно она (не старая из БД)
+      body: JSON.stringify(existing ? { spreadsheet_id: existing } : {}),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+    if (data.spreadsheet_id) document.getElementById("gs-spreadsheet-id").value = data.spreadsheet_id;
+    const note = data.worksheet ? (data.created ? `вкладка «${data.worksheet}» создана` : `вкладка «${data.worksheet}» уже была`) : "";
+    status.innerHTML = `✅ <a href="${escapeHtml(data.url)}" target="_blank">Открыть таблицу</a> ${escapeHtml(note)}`
+      + ((data.warnings || []).length ? ` · ⚠ ${escapeHtml(data.warnings.join("; "))}` : "");
+    status.className = (data.warnings || []).length ? "status err" : "status ok";
+    await loadConfig();  // подтянуть managed_formulas/auto_create_tab в _cfgState
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+});
+
+// ============================== Metrics (семантический реестр) ==============================
+let _columnsSchema = null;   // [{key, kind, col, label, occurrence, formula, description}] — общий
+
+const KIND_TITLES = {
+  base_service: "Запрашиваемые (собираются из сервисов)",
+  base_manual: "Ручные (вводятся в таблице, бэкенд читает)",
+  computed: "Вычисляемые (формулы; правятся в metrics.py)",
+};
+
+async function loadColumnsTab() {
+  const status = document.getElementById("columns-status");
+  status.textContent = "";
+  status.className = "status";
+  document.getElementById("columns-save-status").textContent = "";
+
+  if (!_activeProfileId) await loadProfiles();
+  const p = activeProfile();
+  document.getElementById("columns-profile-name").textContent = (p && p.name) || _activeProfileId || "—";
+  if (!_activeProfileId) {
+    status.textContent = "❌ Не выбран бренд.";
+    status.className = "status err";
+    return;
+  }
+
+  try {
+    // схема per-brand: содержит системные имена и формулы в именах бренда
+    const r0 = await fetch(`/api/metrics?profile_id=${encodeURIComponent(_activeProfileId)}`);
+    if (!r0.ok) throw new Error("не удалось загрузить реестр метрик");
+    _columnsSchema = (await r0.json()).metrics || [];
+    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/config`);
+    if (!r.ok) throw new Error("не удалось прочитать конфиг бренда");
+    const cfg = await r.json();
+    _disabledMetrics = new Set(cfg?.google_sheets?.disabled_metrics || []);
+    document.getElementById("gs-cab-start").value = cfg?.google_sheets?.cabinet_start_col ?? "";
+    document.getElementById("gs-cab-end").value = cfg?.google_sheets?.cabinet_max_col ?? "";
+    renderColumnsTable(cfg?.google_sheets?.column_labels || {},
+                       cfg?.google_sheets?.metric_names || {});
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+}
+
+let _disabledMetrics = new Set();  // локальный state вкладки до сохранения
+
+function loadColumnsTabRerender(key, disable) {
+  if (disable) _disabledMetrics.add(key); else _disabledMetrics.delete(key);
+  // перерисовать по текущей схеме с локальным состоянием
+  _columnsSchema = _columnsSchema.map(c =>
+    c.key === key ? { ...c, disabled: disable } : c);
+  const overrides = {}; const names = {};
+  document.querySelectorAll("#columns-table [data-col-key]").forEach(i => { if (i.value.trim()) overrides[i.dataset.colKey] = i.value.trim(); });
+  document.querySelectorAll("#columns-table [data-name-key]").forEach(i => { if (i.value.trim()) names[i.dataset.nameKey] = i.value.trim(); });
+  renderColumnsTable(overrides, names);
+}
+
+const KIND_BADGES = {
+  base_service: `<span class="kind-tag service" title="Собирается из внешнего сервиса автоматически">сервис</span>`,
+  base_manual: `<span class="kind-tag manual" title="Вводится руками в таблице; бэкенд читает, но не пишет">ручная</span>`,
+  computed: `<span class="kind-tag formula" title="Считается по формуле — бэкендом и в Google Sheets">формула</span>`,
+};
+
+function _manualCabinetRow(label, name, target) {
+  const tr = document.createElement("tr");
+  tr.dataset.mcRow = "1";
+  const isIncome = target === "prihod";
+  tr.innerHTML = `
+    <td class="col-letter">—</td>
+    <td><input type="text" class="inp-sheet" data-mc-label
+          value="${escapeHtml(label || "")}" placeholder="Подпись колонки в зоне кабинетов"></td>
+    <td class="zone-split"><input type="text" class="inp-sys" data-mc-name
+          value="${escapeHtml(name || "")}" placeholder="${escapeHtml(label || "Название в системе")}"></td>
+    <td>${KIND_BADGES.base_manual}</td>
+    <td class="formula-cell">
+      <select data-mc-target class="select" style="font-size:12px; padding:3px 6px;">
+        <option value="zatraty"${isIncome ? "" : " selected"}>расход → Затраты</option>
+        <option value="prihod"${isIncome ? " selected" : ""}>доход → Приход</option>
+      </select>
+    </td>
+    <td class="desc">суммируется в формулу, коэф 1
+      <button type="button" class="danger sm" data-mc-del title="Убрать поле (колонку в листе не трогает)">✕</button>
+    </td>`;
+  tr.querySelector("[data-mc-del]").addEventListener("click", () => tr.remove());
+  return tr;
+}
+
+function renderColumnsTable(overrides, nameOverrides) {
+  const tbody = document.querySelector("#columns-table tbody");
+  tbody.innerHTML = "";
+  ["base_service", "base_manual", "computed"].forEach(kind => {
+    const group = _columnsSchema.filter(c => c.kind === kind);
+    if (!group.length && kind !== "base_manual") return;
+    const trh = document.createElement("tr");
+    trh.className = "metric-group";
+    trh.innerHTML = `<td colspan="6">${KIND_TITLES[kind]}</td>`;
+    tbody.appendChild(trh);
+    group.forEach(c => {
+      const tr = document.createElement("tr");
+      if (c.optional && c.disabled) {
+        // отключённая опциональная метрика: серым, с кнопкой возврата
+        tr.dataset.optKey = c.key;
+        tr.dataset.optDisabled = "1";
+        tr.innerHTML = `
+          <td class="col-letter">${escapeHtml(c.col || "—")}</td>
+          <td colspan="4" class="desc" style="font-style: italic;">
+            «${escapeHtml(c.label || c.key)}» отключена — не читается и выпала из формул
+          </td>
+          <td>
+            <button type="button" class="secondary sm" data-opt-on>вернуть</button>
+          </td>`;
+        tr.querySelector("[data-opt-on]").addEventListener("click", () => {
+          tr.dataset.optDisabled = "";
+          loadColumnsTabRerender(c.key, false);
+        });
+        tbody.appendChild(tr);
+        return;
+      }
+      const occHint = c.occurrence > 1 ? ` <span style="color:var(--muted); font-size:11px;">(${c.occurrence}-е вхожд.)</span>` : "";
+      const what = c.kind === "computed" ? (c.formula || "") : (c.source || (c.kind === "base_manual" ? "ручной ввод в таблице" : ""));
+      const labelOvr = overrides[c.key] || "";
+      const nameOvr = (nameOverrides || {})[c.key] || "";
+      const labelCell = c.label === null
+        ? `<span style="color:var(--muted); font-size:12px;">— нет колонки (скрытая)</span>`
+        : `<input type="text" class="inp-sheet${labelOvr ? " overridden" : ""}"
+                  data-col-key="${escapeHtml(c.key)}" value="${escapeHtml(labelOvr)}"
+                  placeholder="${escapeHtml(c.label)}">${occHint}`;
+      const nameCell = `<input type="text" class="inp-sys${nameOvr ? " overridden" : ""}"
+                  data-name-key="${escapeHtml(c.key)}" value="${escapeHtml(nameOvr)}"
+                  placeholder="${escapeHtml(c.system_name_default || c.label || c.key)}">`;
+      const delBtn = c.optional
+        ? ` <button type="button" class="danger sm" data-opt-off="${escapeHtml(c.key)}"
+              title="Отключить метрику для этого бренда (колонку в листе не трогает)">✕</button>`
+        : "";
+      tr.innerHTML = `
+        <td class="col-letter">${escapeHtml(c.col || "—")}</td>
+        <td>${labelCell}</td>
+        <td class="zone-split">${nameCell}</td>
+        <td>${KIND_BADGES[c.kind] || ""}</td>
+        <td class="formula-cell">${escapeHtml(what)}</td>
+        <td class="desc">${escapeHtml(c.description || "")}${delBtn}</td>`;
+      const off = tr.querySelector("[data-opt-off]");
+      if (off) off.addEventListener("click", () => loadColumnsTabRerender(c.key, true));
+      tbody.appendChild(tr);
+    });
+
+    if (kind === "base_manual") {
+      // динамические ручные поля расходов (AVITO, Google, …): +/✕
+      _columnsSchema.filter(c => c.kind === "manual_cabinet").forEach(c =>
+        tbody.appendChild(_manualCabinetRow(
+          c.label, c.system_name === c.label ? "" : c.system_name, c.target)));
+      const trAdd = document.createElement("tr");
+      trAdd.innerHTML = `<td></td><td colspan="5">
+        <button type="button" class="secondary sm" id="mc-add">＋ Ручное поле</button>
+        <span class="desc" style="margin-left:8px;">
+          колонку с такой подписью заведи в зоне кабинетов листа — или она появится при генерации новой вкладки
+        </span></td>`;
+      trAdd.querySelector("#mc-add").addEventListener("click", () =>
+        tbody.insertBefore(_manualCabinetRow("", ""), trAdd));
+      tbody.appendChild(trAdd);
+    }
+  });
+  // живое выделение изменённых полей (жирная рамка = есть оверрайд)
+  tbody.querySelectorAll("input:not([data-mc-label]):not([data-mc-name])").forEach(inp =>
+    inp.addEventListener("input", () =>
+      inp.classList.toggle("overridden", !!inp.value.trim())));
+}
+
+document.getElementById("columns-save").addEventListener("click", async () => {
+  const status = document.getElementById("columns-save-status");
+  if (!_activeProfileId || !_columnsSchema) {
+    status.textContent = "❌ Не выбран бренд.";
+    status.className = "status err";
+    return;
+  }
+
+  // Пустое поле или совпадение с дефолтом = без оверрайда.
+  const labels = {};
+  document.querySelectorAll("#columns-table [data-col-key]").forEach(inp => {
+    const key = inp.dataset.colKey;
+    const val = inp.value.trim();
+    const def = (_columnsSchema.find(c => c.key === key) || {}).label || "";
+    if (val && val !== def) labels[key] = val;
+  });
+  const names = {};
+  document.querySelectorAll("#columns-table [data-name-key]").forEach(inp => {
+    const key = inp.dataset.nameKey;
+    const val = inp.value.trim();
+    const def = (_columnsSchema.find(c => c.key === key) || {}).system_name_default || "";
+    if (val && val !== def) names[key] = val;
+  });
+  // динамические ручные поля расходов: пустая подпись = строка выброшена
+  const manualCabinets = [];
+  document.querySelectorAll("#columns-table tr[data-mc-row]").forEach(tr => {
+    const label = tr.querySelector("[data-mc-label]").value.trim();
+    if (!label) return;
+    const name = tr.querySelector("[data-mc-name]").value.trim();
+    const target = tr.querySelector("[data-mc-target]").value;
+    manualCabinets.push({ label, name: name || label, target });
+  });
+
+  status.textContent = "Сохраняю…";
+  status.className = "status";
+  try {
+    // read-modify-write всего конфига: секреты в GET приходят пустыми,
+    // сервер восстановит их с диска при сохранении (_merge_preserved_secrets)
+    const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/config`);
+    if (!r.ok) throw new Error("не удалось прочитать конфиг");
+    const cfg = await r.json();
+    cfg.google_sheets = cfg.google_sheets || {};
+    cfg.google_sheets.column_labels = labels;
+    cfg.google_sheets.metric_names = names;
+    cfg.google_sheets.manual_cabinets = manualCabinets;
+    cfg.google_sheets.disabled_metrics = Array.from(_disabledMetrics);
+    cfg.google_sheets.cabinet_start_col = document.getElementById("gs-cab-start").value.trim().toUpperCase();
+    cfg.google_sheets.cabinet_max_col = document.getElementById("gs-cab-end").value.trim().toUpperCase();
+    const w = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg),
+    });
+    const data = await w.json();
+    if (!w.ok) throw new Error(data.detail || JSON.stringify(data));
+    if (_cfgState?.google_sheets) {
+      _cfgState.google_sheets.column_labels = labels;
+      _cfgState.google_sheets.metric_names = names;
+    }
+    await loadColumnsTab();  // перерисовать формулы с новыми именами
+    status.textContent = "✅ Сохранено";
+    status.className = "status ok";
+  } catch (e) {
+    status.textContent = "❌ " + e.message;
+    status.className = "status err";
+  }
+});
+
 // ============================== History ==============================
 async function loadHistory() {
   try {
@@ -1019,11 +1494,7 @@ function fillHistoryFilter() {
   const cur = sel.value;
   const ids = new Set();
   _profilesState.forEach(p => ids.add(p.id));
-  // pid вытаскиваем из имени файла "<date>_<sub1>__<pid>.json"
-  _historyItems.forEach(it => {
-    const m = it.name.match(/__([a-z0-9-]+)\.json$/i);
-    if (m) ids.add(m[1]);
-  });
+  _historyItems.forEach(it => { if (it.profile_id) ids.add(it.profile_id); });
   const nameById = {};
   _profilesState.forEach(p => { nameById[p.id] = p.name; });
   sel.innerHTML = `<option value="">Все бренды</option>` +
@@ -1036,23 +1507,34 @@ function renderHistory() {
   tbody.innerHTML = "";
   const filter = document.getElementById("history-brand-filter").value;
   const items = filter
-    ? _historyItems.filter(it => it.name.match(new RegExp(`__${filter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.json$`, "i")))
+    ? _historyItems.filter(it => it.profile_id === filter)
     : _historyItems;
   if (!items.length) {
-    tbody.innerHTML = `<tr><td colspan="4" style="color: var(--muted);">Пусто. Сгенерируй отчёт во вкладке «Отчёт» или прогони бренд в «Обзоре».</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" style="color: var(--muted);">Пусто. Сгенерируй отчёт во вкладке «Отчёт» или прогони бренд в «Обзоре».</td></tr>`;
     return;
   }
+  const nameById = {};
+  _profilesState.forEach(p => { nameById[p.id] = p.name; });
   items.forEach(item => {
     const tr = document.createElement("tr");
+    const status = item.ok
+      ? `<span class="status ok" style="margin:0;">✅ ${escapeHtml(item.trigger || "")}</span>`
+        + (item.google_sheets_error
+            ? ` <span class="status err" style="margin:0; font-size:11px;" title="${escapeHtml(item.google_sheets_error)}">Sheets!</span>`
+            : "")
+      : `<span class="status err" style="margin:0;" title="${escapeHtml(item.error || "")}">❌ ${escapeHtml(item.trigger || "")}</span>`;
     tr.innerHTML = `
-      <td>${escapeHtml(item.name)}</td>
-      <td>${item.size} B</td>
-      <td>${item.mtime.replace("T", " ")}</td>
-      <td><button class="secondary" data-view="${escapeHtml(item.name)}">Открыть</button></td>
+      <td>${escapeHtml(nameById[item.profile_id] || item.profile_id)}</td>
+      <td>${escapeHtml(item.date)}</td>
+      <td>${escapeHtml(item.sub1 || "")}</td>
+      <td>${status}</td>
+      <td>${escapeHtml((item.finished_at || "").replace("T", " "))}</td>
+      <td><button class="secondary" ${item.has_report ? "" : "disabled"}
+                  data-pid="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.date)}">Открыть</button></td>
     `;
     tr.querySelector("button").addEventListener("click", async (ev) => {
-      const name = ev.target.dataset.view;
-      const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+      const { pid, date } = ev.target.dataset;
+      const rr = await fetch(`/api/reports/${encodeURIComponent(pid)}/${encodeURIComponent(date)}`);
       const data = await rr.json();
       const pre = document.getElementById("history-preview");
       pre.textContent = JSON.stringify(data, null, 2);

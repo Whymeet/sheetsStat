@@ -2,11 +2,10 @@
 
 Задача: для каждого бренда (профиля) в его собственное время по Самаре
 собирать отчёт за предыдущий календарный день (Samara-time) и класть его
-туда же, куда пишет ручной `POST /api/report` — в
-`output/{date}_{sub1}__{profile_id}.json` и в Google Sheets.
+туда же, куда пишет ручной `POST /api/report` — в таблицу `runs` SQLite
+(upsert по (profile_id, date)) и в Google Sheets.
 
-Расписание у каждого бренда своё и живёт прямо в файле профиля
-`cfg/profiles/<id>.json`:
+Расписание у каждого бренда своё и живёт прямо в его конфиге (БД):
 
     "schedule": { "enabled": false, "time": "09:00" }   // HH:MM Europe/Samara
 
@@ -19,10 +18,8 @@ FastAPI lifespan, при изменении любого расписания jo
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -30,6 +27,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+import db
 from core import build_report
 
 
@@ -50,13 +48,11 @@ class ReportScheduler:
     def __init__(
         self,
         profiles_provider: Callable[[], List[ProfileTuple]],
-        output_dir: Path,
     ):
         self._profiles_provider = profiles_provider
-        self._output_dir = output_dir
         self._scheduler = AsyncIOScheduler(timezone=SAMARA_TZ)
-        # last_run по каждому бренду: {pid: run_info}
-        self._last_runs: Dict[str, Dict[str, Any]] = {}
+        # last_run по каждому бренду читается из БД (db.get_last_runs) —
+        # переживает рестарт процесса.
         # снапшот расписаний {pid: schedule} для watcher'а
         self._last_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
         # build_report ушёл в отдельный поток, поэтому бренды с одинаковым временем
@@ -134,6 +130,11 @@ class ReportScheduler:
 
     def status(self) -> Dict[str, Any]:
         """Статус по каждому бренду + сводка для шапки."""
+        try:
+            last_runs = db.get_last_runs()
+        except Exception as e:
+            logger.error("scheduler.status: не смог прочитать last_runs из БД: %s", e)
+            last_runs = {}
         per_profile: Dict[str, Any] = {}
         next_runs: List[datetime] = []
         for job in self._scheduler.get_jobs():
@@ -146,10 +147,10 @@ class ReportScheduler:
             per_profile[pid] = {
                 "enabled": True,
                 "next_run": nrt.astimezone(SAMARA_TZ).isoformat(timespec="minutes") if nrt else None,
-                "last_run": self._last_runs.get(pid),
+                "last_run": last_runs.get(pid),
             }
         # Бренды без активного job'а, но с историей последнего запуска.
-        for pid, lr in self._last_runs.items():
+        for pid, lr in last_runs.items():
             per_profile.setdefault(pid, {"enabled": False, "next_run": None, "last_run": lr})
 
         next_run_iso = None
@@ -232,25 +233,30 @@ class ReportScheduler:
         label = "manual" if manual else "cron"
         started_at = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
         try:
+            shared = db.shared_sheet_brands(
+                pid, (config.get("google_sheets") or {}).get("spreadsheet_id") or "")
+            if shared:
+                logger.warning(
+                    "scheduler[%s]: профиль %r пишет в таблицу, которую использует "
+                    "также бренд: %s — проверь spreadsheet_id", label, pid,
+                    ", ".join(shared),
+                )
+        except Exception:
+            pass
+        report: Optional[Dict[str, Any]] = None
+        try:
             # build_report — синхронный и ходит по сети минуты; на event loop'е он
             # заморозил бы весь uvicorn (морда ловит NetworkError, healthcheck падает).
             async with self._run_lock:
                 report = await asyncio.to_thread(build_report, config, target_day, sub1)
-            out_file = self._output_dir / f"{target_day.isoformat()}_{sub1}__{pid}.json"
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-            out_file.write_text(
-                json.dumps(report, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
             result = {
                 "profile_id": pid,
                 "sub1": sub1,
                 "ok": True,
-                "saved_to": out_file.name,
                 "cabinet_count": report.get("cabinet_count"),
                 "google_sheets_error": (report.get("google_sheets") or {}).get("error"),
             }
-            logger.info("scheduler[%s]: профиль %r ok, saved %s", label, pid, out_file.name)
+            logger.info("scheduler[%s]: профиль %r ok, date %s", label, pid, target_day)
         except Exception as e:
             result = {
                 "profile_id": pid,
@@ -264,7 +270,22 @@ class ReportScheduler:
         result["finished_at"] = datetime.now(SAMARA_TZ).isoformat(timespec="seconds")
         result["date"] = target_day.isoformat()
         result["trigger"] = label
-        self._last_runs[pid] = result
+        try:
+            # Запись — миллисекунды (WAL, локальный файл), прогоны и так
+            # сериализованы _run_lock — можно синхронно из корутины.
+            # report=None у упавшего прогона не затирает последний удачный отчёт.
+            db.save_run(
+                pid, target_day.isoformat(), sub1,
+                ok=result["ok"], trigger=label,
+                error=result.get("error"),
+                google_sheets_error=result.get("google_sheets_error"),
+                cabinet_count=result.get("cabinet_count"),
+                started_at=started_at, finished_at=result["finished_at"],
+                report=report,
+            )
+        except Exception as e:
+            logger.error("scheduler[%s]: не смог сохранить прогон %r в БД: %s",
+                         label, pid, e, exc_info=True)
         return result
 
 
