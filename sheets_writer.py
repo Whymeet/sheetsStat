@@ -152,10 +152,10 @@ TEMPLATE_ROW = 33
 _TEMPLATE_RANGE = f"A{TEMPLATE_ROW}:ZZ{TEMPLATE_ROW}"
 # \b нужен, чтобы 33 не цеплялось посреди 330/133, но срабатывало на AR33 / AR$33.
 _TEMPLATE_ROW_RE = re.compile(rf"(\$?[A-Z]+\$?){TEMPLATE_ROW}\b")
-# Кэш формул по (spreadsheet_id, title вкладки) — один раз на процесс.
-# spreadsheet_id в ключе обязателен: процесс обслуживает все бренды, а title
-# вида «Август 26» одинаков во всех таблицах.
-_TEMPLATE_CACHE: Dict[Tuple[str, str], Dict[str, str]] = {}
+# Кэша шаблона НЕТ (убран 2026-09-02): строка 33 читается на каждом прогоне.
+# Кэш по (spreadsheet_id, title) переживал пересоздание/переименование вкладки
+# и ручное удаление колонок — в новую вкладку клонировались формулы старой
+# раскладки (N=R/H, W=AN, AL=AE+AJ+U). Одно чтение строки на прогон дешевле.
 
 _WS_SPACE_RE = re.compile(r"\s+")
 
@@ -402,13 +402,8 @@ def _load_template_formulas(ws: Any, spreadsheet_id: str, title: str) -> Dict[st
     """Читает формулы из строки-эталона TEMPLATE_ROW вкладки.
 
     Возвращает `{col_letter: formula}` только для ячеек, начинающихся с `=`.
-    Результат кэшируется по (spreadsheet_id, title) на всё время жизни процесса.
+    Читается заново на каждом прогоне (без кэша — см. комментарий у TEMPLATE_ROW).
     """
-    cache_key = (spreadsheet_id, title)
-    cached = _TEMPLATE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
     try:
         rows = ws.get(_TEMPLATE_RANGE, value_render_option="FORMULA")
     except TypeError:
@@ -425,7 +420,6 @@ def _load_template_formulas(ws: Any, spreadsheet_id: str, title: str) -> Dict[st
         "Sheets/%s: шаблонных формул в строке %d — %d (%s)",
         title, TEMPLATE_ROW, len(template), ", ".join(sorted(template.keys())) or "—",
     )
-    _TEMPLATE_CACHE[cache_key] = template
     return template
 
 
