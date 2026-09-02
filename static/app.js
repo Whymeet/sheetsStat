@@ -1134,7 +1134,6 @@ document.getElementById("save-config").addEventListener("click", async () => {
       column_labels: _cfgState?.google_sheets?.column_labels || {},
       metric_names: _cfgState?.google_sheets?.metric_names || {},
       managed_formulas: !!_cfgState?.google_sheets?.managed_formulas,
-      auto_create_tab: !!_cfgState?.google_sheets?.auto_create_tab,
       cabinet_coeffs: _cfgState?.google_sheets?.cabinet_coeffs || {},
       manual_cabinets: _cfgState?.google_sheets?.manual_cabinets || [],
       cabinets: _cfgState?.google_sheets?.cabinets || [],
@@ -1230,7 +1229,7 @@ document.getElementById("gs-create").addEventListener("click", async () => {
     status.innerHTML = `✅ <a href="${escapeHtml(data.url)}" target="_blank">Открыть таблицу</a> ${escapeHtml(note)}`
       + ((data.warnings || []).length ? ` · ⚠ ${escapeHtml(data.warnings.join("; "))}` : "");
     status.className = (data.warnings || []).length ? "status err" : "status ok";
-    await loadConfig();  // подтянуть managed_formulas/auto_create_tab в _cfgState
+    await loadConfig();  // подтянуть managed_formulas в _cfgState
   } catch (e) {
     status.textContent = "❌ " + e.message;
     status.className = "status err";

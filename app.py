@@ -466,15 +466,14 @@ class GoogleSheetsSettings(BaseModel):
     metric_names: Dict[str, str] = {}
     # Семантический движок метрик / генерация листов:
     # managed_formulas — формулы строк генерятся из реестра (metrics.py), а не
-    # клонируются из строки 33; auto_create_tab — недостающая месячная вкладка
-    # создаётся автоматически; cabinet_coeffs — {имя кабинета: коэффициент} для
+    # клонируются из строки 33 (недостающая месячная вкладка создаётся из
+    # реестра всегда); cabinet_coeffs — {имя кабинета: коэффициент} для
     # бэкенд-расчёта Затрат и генерации листов (строка 1 живого листа главнее
     # при записи в существующие); manual_cabinets — ручные колонки расходов в
     # кабинетной зоне (AVITO, Google): бэкенд читает, никогда не пишет;
     # cabinets — имена кабинетов для шапки генерируемого листа; share_with —
     # кому расшарить таблицу, созданную с нуля.
     managed_formulas: bool = False
-    auto_create_tab: bool = False
     cabinet_coeffs: Dict[str, float] = {}
     # Ручные поля расходов кабинетной зоны: [{label: подпись колонки в листе,
     # name: название в системе}]. Legacy-строки нормализуются валидатором.
@@ -923,10 +922,9 @@ def create_profile_spreadsheet(pid: str, req: Optional[SheetsCreateRequest] = No
             ))
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
-    # созданная таблица — managed: формулы из реестра, вкладки автосоздаются
+    # созданная таблица — managed: формулы из реестра
     cfg["google_sheets"]["spreadsheet_id"] = result["spreadsheet_id"]
     cfg["google_sheets"]["managed_formulas"] = True
-    cfg["google_sheets"]["auto_create_tab"] = True
     write_profile(pid, cfg)
     logger.info("Профиль %r: создана таблица %s", pid, result["spreadsheet_id"])
     return result
@@ -968,7 +966,6 @@ def init_profile_spreadsheet(pid: str, req: Optional[SheetsInitRequest] = None):
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
     cfg["google_sheets"]["managed_formulas"] = True
-    cfg["google_sheets"]["auto_create_tab"] = True
     write_profile(pid, cfg)
     logger.info("Профиль %r: таблица размечена (вкладка %r, created=%s)",
                 pid, ws.title, created)

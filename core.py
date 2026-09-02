@@ -511,7 +511,7 @@ def build_report(
         from sheets_writer import (
             compute_cabinet_spend, open_sheet_context, zayavki_value,
         )
-        ctx = open_sheet_context(config, day)
+        ctx = open_sheet_context(config, day, report=result)
     except Exception as e:
         logger.error("Sheets: не удалось открыть контекст листа: %s", e, exc_info=True)
 

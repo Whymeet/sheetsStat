@@ -586,9 +586,9 @@ def open_sheet_context(
 ) -> SheetContext:
     """Открывает таблицу/вкладку/строку даты и читает шапку + окно строки.
 
-    При `google_sheets.auto_create_tab=true` недостающая месячная вкладка
-    создаётся из реестра метрик (sheet_builder); `report` даёт имена кабинетов
-    текущего дня для шапки создаваемой вкладки.
+    Недостающая месячная вкладка создаётся из реестра метрик (sheet_builder)
+    всегда; `report` даёт имена кабинетов текущего дня для шапки создаваемой
+    вкладки. Если генерация упала — ошибка в ctx.error, запись пропускается.
     """
     gs_cfg = config.get("google_sheets") or {}
     if not gs_cfg.get("enabled", False):
@@ -606,7 +606,7 @@ def open_sheet_context(
     )
     ws, title = _pick_worksheet(spreadsheet, day)
     ctx.title = title
-    if ws is None and gs_cfg.get("auto_create_tab"):
+    if ws is None:
         try:
             import sheet_builder
             extra = [name for name, _s, _src in _collect_cabinets(report or {})]
@@ -616,7 +616,8 @@ def open_sheet_context(
         except Exception as e:
             logger.error("Sheets/%s: автосоздание вкладки упало: %s", title, e,
                          exc_info=True)
-            ws = None
+            ctx.error = f"вкладка {title!r} не найдена, автосоздание упало: {e}"
+            return ctx
     if ws is None:
         ctx.error = f"вкладка {title!r} не найдена"
         return ctx
@@ -832,7 +833,7 @@ def write_daily_report(
     """
     gs_cfg = config.get("google_sheets") or {}
     if context is None:
-        context = open_sheet_context(config, day, spreadsheet=spreadsheet)
+        context = open_sheet_context(config, day, spreadsheet=spreadsheet, report=report)
     if not context.enabled:
         return {"enabled": False, "reason": "google_sheets.enabled = false"}
     if context.error:
