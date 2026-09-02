@@ -76,8 +76,8 @@ METRICS: Dict[str, Metric] = dict([
     _m("chistaya", "B", "Чистая", "computed", expr="prihod - zatraty",
        description="Чистая прибыль: Приход − Затраты"),
     _m("prihod", "C", "Приход", "computed",
-       expr="dohod_vitrina + manual_income",
-       description="Приход: Доход с витрины + Σ ручных доходных полей (target=prihod)"),
+       expr="lt_sumwebmaster + manual_income",
+       description="Приход: доход вебмастера LeadsTech (sumwebmaster, полная сумма) + Σ ручных доходных полей (target=prihod)"),
     _m("zatraty", "D", "Затраты", "computed",
        expr="sms_cost + cabinet_spend",
        description="Затраты: Расход СМС + Σ(расход кабинета × коэффициент)"),
@@ -159,7 +159,7 @@ METRICS: Dict[str, Metric] = dict([
     # Скрытая базовая: не имеет колонки, в A1-формулах инлайнится литералом
     # (как сейчас `=681266,48-AE13` в живой таблице).
     _m("lt_sumwebmaster", None, None, "base_service", source="leadstech.sum",
-       description="LeadsTech: доход вебмастера (sumwebmaster) — операнд «Дохода с витрины»"),
+       description="LeadsTech: доход вебмастера (sumwebmaster) — операнд «Прихода» и «Дохода с витрины»"),
 ])
 
 

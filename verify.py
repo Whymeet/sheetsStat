@@ -159,7 +159,7 @@ def verify_worksheet(ws, config: Dict[str, Any]) -> Dict[str, Any]:
             col = cols.get(key)
             if col is None:
                 continue
-            if key == "dohod_vitrina" and env["lt_sumwebmaster"] is None:
+            if env["lt_sumwebmaster"] is None and "lt_sumwebmaster" in M._expr_names(M._PARSED[key]):
                 continue  # нет литерала — строку писал не бэкенд, нечего сверять
             raw = raw_cell(col)
             if raw is None or raw == "":

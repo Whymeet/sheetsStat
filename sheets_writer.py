@@ -11,7 +11,7 @@
 переопределяются в конфиге: `google_sheets.column_labels: {key: "подпись"}`.
 
 Метрики реестра (легаси-раскладка в скобках — только исторический default):
-    prihod        (C)  — формула `=<dohod_vitrina>` (+ доходные ручные поля)
+    prihod        (C)  — формула `={leadstech.sum}` (+ доходные ручные поля)
     zatraty       (D)  — формула Σ(расход_i * коэф_i) + <sms_cost>
     clicks_lt     (E)  — leadstech.clicks
     metrika_v     (F)  — yandex_metrika.visits
@@ -87,7 +87,7 @@ AGG_COLUMNS: Dict[str, Tuple[str, int, str]] = {
 # Семантика метрик — что именно пишется в колонку. Показывается во вкладке
 # «Колонки» UI рядом с редактируемой подписью (GET /api/sheets/columns).
 AGG_COLUMN_DESCRIPTIONS: Dict[str, str] = {
-    "prihod":        "Формула: Доход с витрины + Σ ручных доходных полей",
+    "prihod":        "Формула: доход вебмастера LeadsTech (литерал) + Σ ручных доходных полей",
     "zatraty":       "Формула: Расход СМС + Σ(кабинет × коэффициент из строки 1)",
     "clicks_lt":     "LeadsTech: уники (uniques) по sub1, сумма по всем аккаунтам",
     "metrika_v":     "Яндекс.Метрика: визиты счётчика за день",
@@ -403,15 +403,14 @@ def _substitute_template_row(formula: str, target_row: int) -> str:
     return _TEMPLATE_ROW_RE.sub(rf"\g<1>{target_row}", formula)
 
 
-def _build_prihod_formula(row: int, cols: Dict[str, str],
+def _build_prihod_formula(row: int, sumwebmaster: float,
                           income_cols: Optional[List[str]] = None) -> str:
-    """Формула «Приход»: `=<dohod_vitrina>` + колонки доходных ручных полей
-    (target="prihod"). Приход СМС, «Клиенты» и «Долеты и Крот» в приход не
-    входят (решение пользователя, 2026-09-02).
-
-    Вызывающий код обязан проверить, что `dohod_vitrina` есть в `cols`.
+    """Формула «Приход»: `={leadstech.sum}` + колонки доходных ручных полей
+    (target="prihod"). Литерал — полная сумма вебмастера LeadsTech (как в
+    «Доходе с витрины», но без вычета СМС). Приход СМС, «Клиенты» и «Долеты
+    и Крот» в приход не входят (решение пользователя, 2026-09-02).
     """
-    base = f"={cols['dohod_vitrina']}{row}"
+    base = "=" + f"{sumwebmaster:.2f}".replace(".", ",")
     for col in income_cols or []:
         base += f"+{col}{row}"
     return base
@@ -998,8 +997,8 @@ def write_daily_report(
         # Legacy: три формулы как раньше, остальные колонки — клон строки 33.
         _add_formula("dohod_vitrina", ("sms_charge",),
                      lambda: _build_dohod_vitrina_formula(date_row, fixed["prihod"], cols))
-        _add_formula("prihod", ("dohod_vitrina",),
-                     lambda: _build_prihod_formula(date_row, cols, income_cols))
+        _add_formula("prihod", (),
+                     lambda: _build_prihod_formula(date_row, fixed["prihod"], income_cols))
         _add_formula("zatraty", ZATRATY_PLAIN_KEYS,
                      lambda: _build_zatraty_formula(
                          date_row, coeffs_map, [cols[k] for k in ZATRATY_PLAIN_KEYS]))
