@@ -501,20 +501,9 @@ class GoogleSheetsSettings(BaseModel):
                                 "target": target if target in ("zatraty", "prihod") else "zatraty"})
         return out
     share_with: List[str] = []
-    # Отключённые опциональные метрики (metrics.OPTIONAL_METRICS): например
-    # "dolety" — тогда значение не читается, зависимые формулы (бекендер)
-    # не пишутся. Мусор отбрасывается.
-    disabled_metrics: List[str] = []
-
-    @field_validator("disabled_metrics", mode="before")
-    @classmethod
-    def _normalize_disabled(cls, v):
-        import metrics as metrics_mod
-        return sorted({str(x).strip() for x in (v or [])} & metrics_mod.OPTIONAL_METRICS)
-
-    # Область расходов кабинетов на листе (редактируется в UI). Пусто = AR..EZ.
-    # Начало не может залезать в агрегатную зону — при чтении клампится до AN
-    # (sheets_writer.cabinet_bounds).
+    # Область расходов кабинетов на листе (редактируется в UI). Пусто = AP..EZ.
+    # Начало не может залезать в агрегатную зону — при чтении клампится до
+    # первой колонки после реестра (AL, sheets_writer.cabinet_bounds).
     cabinet_start_col: str = ""
     cabinet_max_col: str = ""
 
@@ -824,8 +813,8 @@ def save_schedule_settings(s: ScheduleGlobal):
 def get_metrics_registry(profile_id: Optional[str] = None):
     """Полный семантический реестр метрик (metrics.METRICS) для UI.
 
-    kind: base_service — запрашиваются из сервисов; base_manual — вводятся
-    людьми в таблице (бэкенд читает обратно); computed — считаются по формуле.
+    kind: base_service — запрашиваются из сервисов; computed — считаются по
+    формуле; manual_cabinet — ручные кабинетные поля бренда (не из реестра).
     С `profile_id` подмешиваются per-brand «названия внутри системы»
     (`google_sheets.metric_names`): поле `system_name` и рендер формул.
     """
@@ -838,14 +827,11 @@ def get_metrics_registry(profile_id: Optional[str] = None):
         gs_cfg = cfg.get("google_sheets") or {}
         names_override = gs_cfg.get("metric_names") or {}
     defaults = metrics_mod.default_system_names()
-    disabled_set = set(gs_cfg.get("disabled_metrics") or [])
     out = [
         {
             "key": m.key,
             "kind": m.kind,
             "col": m.col,
-            "optional": m.key in metrics_mod.OPTIONAL_METRICS,
-            "disabled": m.key in disabled_set,
             "label": m.label,
             "system_name": (names_override.get(m.key) or "").strip()
                            or defaults.get(m.key, m.key),

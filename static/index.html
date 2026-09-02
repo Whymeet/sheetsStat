@@ -342,8 +342,8 @@
           <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
             Логин/пароль 8connect. sheetsStat авторизуется через
             <code>/api/auth/login</code>, дёргает <code>/api/report/list</code> за день
-            по указанным ID схем и суммирует <b>расход</b> (пишется в колонку AC —
-            слагаемое формулы «Затраты» D) и <b>доход</b> (пишется в AE).
+            по указанным ID схем и суммирует <b>расход</b> (пишется в колонку AA —
+            слагаемое формулы «Затраты» D) и <b>доход</b> (пишется в AC).
           </p>
           <div class="grid two">
             <label>Login
@@ -368,7 +368,7 @@
           <p style="color: var(--muted); margin-top: 0; font-size: 13px;">
             Запись отчёта в таблицу: метрики находят свои колонки <b>по подписям
             строки 2</b> (редактируются во вкладке «Колонки»), расходы кабинетов —
-            по названию кабинета в шапке от <code>AR2</code>. Вкладка выбирается
+            по названию кабинета в шапке от <code>AP2</code>. Вкладка выбирается
             по месяцу («Апрель 26»). У нового бренда таблица должна быть копией
             шаблона.
           </p>
@@ -407,14 +407,14 @@
           </p>
           <div class="grid two" style="margin-bottom:4px;">
             <label>Область кабинетов: с колонки
-              <input type="text" id="gs-cab-start" placeholder="AR" style="text-transform:uppercase;">
+              <input type="text" id="gs-cab-start" placeholder="AP" style="text-transform:uppercase;">
             </label>
             <label>Область кабинетов: по колонку
               <input type="text" id="gs-cab-end" placeholder="EZ" style="text-transform:uppercase;">
             </label>
             <small style="grid-column: 1 / -1; color: var(--muted); font-size: 12px;">
               Расходы кабинетов на листе: имена — строка 2, коэффициенты — строка 1.
-              Пусто = AR..EZ. Левее AN сдвинуть нельзя — там метрики из таблицы выше.
+              Пусто = AP..EZ. Левее AL сдвинуть нельзя — там метрики из таблицы выше.
             </small>
           </div>
           <p id="columns-status" class="status" style="margin-left:0;"></p>

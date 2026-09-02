@@ -17,13 +17,14 @@
     metrika_v     (F)  — yandex_metrika.visits
     zayavki       (G)  — Достижения/Целевые визиты цели бренда
                          (yandex_metrika.zayavki_metric: reaches|visits)
-    dolety        (R)  — не пишется, ручная колонка (операнд «бекендера»)
-    sms_count     (AB) — eightconnect.count (кол-во отправленных SMS)
-    sms_cost      (AC) — eightconnect.cost
-    sms_charge    (AE) — eightconnect.charge
-    sms_clients   (AF) — всегда 0 (по требованию)
-    perehody      (AI) — leadstech.hosts
-    dohod_vitrina (AJ) — формула `={leadstech.sum}-<sms_charge>`
+    sms_count     (Z)  — eightconnect.count (кол-во отправленных SMS)
+    sms_cost      (AA) — eightconnect.cost
+    sms_charge    (AC) — eightconnect.charge
+    sms_clients   (AD) — всегда 0 (по требованию)
+    perehody      (AG) — leadstech.hosts
+    dohod_vitrina (AH) — формула `={leadstech.sum}-<sms_charge>`
+(Layout сдвинут на две колонки 2026-09-02: удалены N «бекендер» и R «Долеты
+и Крот»; старые листы мигрируются удалением этих колонок руками.)
 
 Политика промаха — strict: подпись не нашлась → метрика НЕ пишется (warning
 в сводке `header_warnings`, ячейку заполнит шаблонная формула строки 33, если
@@ -36,7 +37,7 @@
 (`leadstech.accounts[]` в конфиге); разбивка лежит в `leadstech.accounts` отчёта
 и в таблицу не пишется.
 
-Кабинетная зона — от CABINET_START_COL (AR, фиксированная граница: определять
+Кабинетная зона — от CABINET_START_COL (AP, фиксированная граница: определять
 её динамически ненадёжно, у брендов разметка строки 1 различается). В строке 2
 лежат названия рекламных кабинетов: по каждому spent'у из отчёта ищем свою
 колонку и пишем spent в `{col}{date_row}`. Кабинеты, которых нет в шапке (в т.ч.
@@ -75,13 +76,12 @@ AGG_COLUMNS: Dict[str, Tuple[str, int, str]] = {
     "clicks_lt":     ("Клики лт",        1, "E"),
     "metrika_v":     ("Метрика визиты",  1, "F"),
     "zayavki":       ("Заявки с сайта",  1, "G"),
-    "dolety":        ("Долеты и Крот",   1, "R"),   # ручная, не пишется
-    "sms_count":     ("кол-во смсок",    1, "AB"),
-    "sms_cost":      ("Расход",          1, "AC"),
-    "sms_charge":    ("Приход",          2, "AE"),  # дубль «Приход» — 2-е вхождение (блок СМС)
-    "sms_clients":   ("Клиенты",         1, "AF"),  # пишется литерал 0
-    "perehody":      ("Переходы Уники",  1, "AI"),
-    "dohod_vitrina": ("Доход с витрины", 1, "AJ"),  # формула
+    "sms_count":     ("кол-во смсок",    1, "Z"),
+    "sms_cost":      ("Расход",          1, "AA"),
+    "sms_charge":    ("Приход",          2, "AC"),  # дубль «Приход» — 2-е вхождение (блок СМС)
+    "sms_clients":   ("Клиенты",         1, "AD"),  # пишется литерал 0
+    "perehody":      ("Переходы Уники",  1, "AG"),
+    "dohod_vitrina": ("Доход с витрины", 1, "AH"),  # формула
 }
 
 # Семантика метрик — что именно пишется в колонку. Показывается во вкладке
@@ -92,7 +92,6 @@ AGG_COLUMN_DESCRIPTIONS: Dict[str, str] = {
     "clicks_lt":     "LeadsTech: уники (uniques) по sub1, сумма по всем аккаунтам",
     "metrika_v":     "Яндекс.Метрика: визиты счётчика за день",
     "zayavki":       "Яндекс.Метрика: число цели «Zayvka» (или первой цели бренда)",
-    "dolety":        "Ведётся руками, мы не пишем — операнд «бекендера», в «Приход» не входит",
     "sms_count":     "8connect: количество отправленных SMS (count)",
     "sms_cost":      "8connect: расход на рассылку (cost)",
     "sms_charge":    "8connect: доход с рассылки (charge)",
@@ -102,21 +101,23 @@ AGG_COLUMN_DESCRIPTIONS: Dict[str, str] = {
 }
 
 # «Всегда-плоские» слагаемые формулы «Затраты» (множитель 1) вне диапазона
-# кабинетов: расход 8connect (лежит до AR). Коэффициенты кабинетных колонок
+# кабинетов: расход 8connect (лежит до AP). Коэффициенты кабинетных колонок
 # читаются динамически из строки 1 листа над именем кабинета
 # (см. _parse_coeff): число → множитель, пусто/символ → 1.
 ZATRATY_PLAIN_KEYS: Tuple[str, ...] = ("sms_cost",)
 
-# Граница кабинетной зоны: имена кабинетов — в строке 2 от AR, коэффициенты
-# (НДС/комиссии) — в строке 1 над именем. Левее AR — агрегатная зона (подписи
-# метрик AGG_COLUMNS). Граница фиксированная: определять её динамически по
-# строке 1 ненадёжно (разметка у брендов различается).
+# Граница кабинетной зоны: имена кабинетов — в строке 2 от AP, коэффициенты
+# (НДС/комиссии) — в строке 1 над именем. Левее AP — агрегатная зона (подписи
+# метрик реестра A..AK + служебные AL..AO). Граница фиксированная: определять
+# её динамически по строке 1 ненадёжно (разметка у брендов различается).
+# AP = прежний AR минус две удалённые колонки (N «бекендер», R «Долеты и
+# Крот») — ровно то, что получается в старых листах после их удаления.
 # EZ — верхняя граница «с запасом» (под будущий рост числа кабинетов), но лист
 # конкретного месяца может быть уже неё: Google Sheets не даст прочитать
 # диапазон, выходящий за пределы физической сетки листа. Поэтому диапазон
 # чтения шапки в _read_header() всегда обрезается по ws.col_count — раздувать
 # лист пустыми столбцами под эту константу не нужно.
-CABINET_START_COL = "AR"
+CABINET_START_COL = "AP"
 CABINET_MAX_COL    = "EZ"
 
 
@@ -124,10 +125,13 @@ def cabinet_bounds(config_or_gs: Dict[str, Any]) -> Tuple[int, int]:
     """(start_idx, max_idx) кабинетной зоны бренда.
 
     Область редактируется в конфиге: `google_sheets.cabinet_start_col` /
-    `cabinet_max_col` (дефолт AR..EZ). Начало не может залезать в агрегатную
-    зону (подписи метрик A..AM + служебные AN..AQ): всё левее AN молча
-    поднимается до AN — иначе агрегатные колонки посчитались бы кабинетами.
+    `cabinet_max_col` (дефолт AP..EZ). Начало не может залезать в агрегатную
+    зону (подписи метрик реестра A..AK): всё левее первой колонки после
+    реестра (AL) молча поднимается до неё — иначе агрегатные колонки
+    посчитались бы кабинетами.
     """
+    import metrics as metrics_mod
+    agg_end_idx = max(_col_index(c) for c, _m in metrics_mod.layout_columns())
     gs = config_or_gs.get("google_sheets", config_or_gs) or {}
 
     def _parse(v: Any, default: str) -> int:
@@ -135,7 +139,7 @@ def cabinet_bounds(config_or_gs: Dict[str, Any]) -> Tuple[int, int]:
         return _col_index(s) if s and s.isalpha() else _col_index(default)
 
     start = max(_parse(gs.get("cabinet_start_col"), CABINET_START_COL),
-                _col_index("AN"))
+                agg_end_idx + 1)
     end = _parse(gs.get("cabinet_max_col"), CABINET_MAX_COL)
     return start, max(end, start)
 
@@ -407,8 +411,8 @@ def _build_prihod_formula(row: int, sumwebmaster: float,
                           income_cols: Optional[List[str]] = None) -> str:
     """Формула «Приход»: `={leadstech.sum}` + колонки доходных ручных полей
     (target="prihod"). Литерал — полная сумма вебмастера LeadsTech (как в
-    «Доходе с витрины», но без вычета СМС). Приход СМС, «Клиенты» и «Долеты
-    и Крот» в приход не входят (решение пользователя, 2026-09-02).
+    «Доходе с витрины», но без вычета СМС). Приход СМС и «Клиенты» в приход
+    не входят (решение пользователя, 2026-09-02).
     """
     base = "=" + f"{sumwebmaster:.2f}".replace(".", ",")
     for col in income_cols or []:
@@ -557,9 +561,9 @@ def _build_gsheets_spreadsheet(config: Dict[str, Any]) -> Optional[Any]:
 class SheetContext:
     """Открытый лист + прочитанная шапка + окно строки даты.
 
-    Открывается ДО вычисления метрик (build_report читает отсюда ручные
-    значения: R «Долеты и Крот», ручные кабинетные колонки AVITO/Google),
-    затем передаётся в write_daily_report — лист не открывается дважды.
+    Открывается ДО вычисления метрик (build_report читает отсюда текущие
+    значения ручных кабинетных колонок AVITO/Google), затем передаётся в
+    write_daily_report — лист не открывается дважды.
     """
     enabled: bool = True
     error: Optional[str] = None
@@ -629,8 +633,8 @@ def open_sheet_context(
     except Exception as e:
         logger.warning("Sheets/%s: не удалось прочитать шапку A1:…2: %s", title, e)
 
-    # Окно строки даты — источник ручных значений. Ошибка чтения не фатальна:
-    # ручные метрики просто посчитаются как 0 (assumed_zero).
+    # Окно строки даты — источник значений ручных кабинетных колонок. Ошибка
+    # чтения не фатальна: они просто посчитаются как 0.
     try:
         end_idx = min(_max_idx, ws.col_count)
         rng = f"A{ctx.date_row}:{_col_letter(end_idx)}{ctx.date_row}"
@@ -689,16 +693,6 @@ def manual_cabinet_entries(gs_cfg: Dict[str, Any]) -> List[Dict[str, str]]:
     return out
 
 
-def disabled_metrics(gs_cfg: Dict[str, Any]) -> set:
-    """Отключённые опциональные метрики бренда (google_sheets.disabled_metrics).
-
-    Пересечение с metrics.OPTIONAL_METRICS — мусор в конфиге игнорируется.
-    """
-    import metrics as metrics_mod
-    raw = {str(x).strip() for x in (gs_cfg.get("disabled_metrics") or [])}
-    return raw & metrics_mod.OPTIONAL_METRICS
-
-
 def manual_income_labels_norm(gs_cfg: Dict[str, Any]) -> set:
     """Нормализованные подписи ДОХОДНЫХ ручных полей (target=prihod).
 
@@ -722,31 +716,6 @@ def zayavki_value(config: Dict[str, Any], report: Dict[str, Any]) -> int:
     return _find_goal_value(ym, TARGET_GOAL_FOR_ZAYAVKI, zayavki_metric)
 
 
-def extract_manual_values(
-    ctx: Optional[SheetContext],
-    config: Dict[str, Any],
-) -> Dict[str, Optional[float]]:
-    """Значения base_manual метрик (R «Долеты и Крот»…) из строки даты листа."""
-    import metrics as metrics_mod
-
-    out: Dict[str, Optional[float]] = {k: None for k in metrics_mod.manual_keys()}
-    if ctx is None or ctx.error or not ctx.enabled or not ctx.row_values:
-        return out
-    gs_cfg = config.get("google_sheets") or {}
-    cols, _ = metrics_mod.resolve_registry_columns(
-        ctx.label_row, gs_cfg.get("column_labels") or {},
-        cabinet_bounds(gs_cfg)[0],
-    )
-    dset = disabled_metrics(gs_cfg)
-    for key in out:
-        if key in dset:
-            continue  # отключена — значение не читается, считается как 0
-        col = cols.get(key)
-        if col:
-            out[key] = _ctx_row_value(ctx, col)
-    return out
-
-
 def compute_cabinet_spend(
     ctx: Optional[SheetContext],
     config: Dict[str, Any],
@@ -760,7 +729,8 @@ def compute_cabinet_spend(
     ячейки (ручные AVITO/Google и колонки, которые сегодняшний прогон не
     трогает); множитель — из строки 1. Это в точности сумма, которую даст
     формула D после записи. Кабинеты отчёта БЕЗ колонки в шапке в лист не
-    попадают и в сумму не входят (как и в формулу D) — warning.
+    попадают и в сумму не входят (как и в формулу D); они видны в сводке
+    записи (`unmatched`).
 
     Без листа (enabled=false/ошибка): фолбэк — Σ spent×коэф из конфига
     `google_sheets.cabinet_coeffs` (дефолт 1); ручные значения недоступны.
@@ -799,11 +769,9 @@ def compute_cabinet_spend(
 
     # свежие spent по колонкам — как их запишет writer (суммирование дублей)
     by_col_spent: Dict[str, float] = {}
-    unmatched_spend = 0.0
     for name, spent, _source in cabinets:
         col = _find_header_column(headers_map, name)
         if col is None:
-            unmatched_spend += float(spent)
             continue
         by_col_spent[col] = by_col_spent.get(col, 0.0) + float(spent)
         # расхождение коэффициентов конфиг vs строка 1 — громко
@@ -813,11 +781,6 @@ def compute_cabinet_spend(
                 f"кабинет {name!r}: коэффициент в конфиге {cfg_k} ≠ строке 1 "
                 f"листа {coeffs_map.get(col)} — считаю по листу"
             )
-    if unmatched_spend:
-        warnings.append(
-            f"кабинеты без колонки в шапке на {round(unmatched_spend, 2)} — "
-            "в лист и в Затраты не попадают"
-        )
 
     total = 0.0
     for col, k in coeffs_map.items():
@@ -992,7 +955,6 @@ def write_daily_report(
     _add("sms_charge",  fixed["eightconnect_charge"])
     _add("sms_count",   fixed["eightconnect_count"])
     _add("sms_clients", 0)  # по требованию всегда 0
-    dset = disabled_metrics(gs_cfg)
     if not managed:
         # Legacy: три формулы как раньше, остальные колонки — клон строки 33.
         _add_formula("dohod_vitrina", ("sms_charge",),
@@ -1010,8 +972,7 @@ def write_daily_report(
     if managed:
         # Формулы ВСЕХ вычисляемых метрик из реестра — самовосстановление
         # после ручных правок. Колонки — по подписям строки 2 (полный реестр).
-        # Ручные метрики (R «Долеты и Крот») и ручные кабинетные колонки
-        # здесь не пишутся никогда.
+        # Ручные кабинетные колонки здесь не пишутся никогда.
         import metrics as metrics_mod
         reg_cols, reg_warns = metrics_mod.resolve_registry_columns(
             label_row, gs_cfg.get("column_labels") or {}, cab_start_idx
@@ -1021,7 +982,6 @@ def write_daily_report(
             literals={"lt_sumwebmaster": fixed["prihod"]},
             cabinet_terms=sorted(coeffs_map.items(), key=lambda ck: _col_index(ck[0])),
             income_terms=sorted(income_cols, key=_col_index),
-            disabled=dset,
         )
         hidden = {k for k, m in metrics_mod.METRICS.items() if m.col is None}
         for key in metrics_mod.computed_keys():
@@ -1048,7 +1008,7 @@ def write_daily_report(
                 header_warnings.append(f"managed: формула {key} не записана: {e}")
                 continue
             if formula is None:
-                continue  # выродилась из-за отключённых метрик — намеренно
+                continue  # выродилась (пустой manual_income) — намеренно
             batch.append({"range": f"{col}{date_row}", "values": [[formula]]})
         if reg_warns:
             header_warnings.extend(f"managed: {w}" for w in reg_warns)
@@ -1067,7 +1027,7 @@ def write_daily_report(
         else:
             t_ctx = metrics_mod.A1Context(
                 colmap=reg_cols, row=totals_row, literals={},
-                cabinet_terms=[], income_terms=[], disabled=dset,
+                cabinet_terms=[], income_terms=[],
             )
             for key in metrics_mod.TOTALS:
                 try:

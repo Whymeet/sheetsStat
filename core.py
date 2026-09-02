@@ -505,12 +505,11 @@ def build_report(
     _check()
 
     # Контекст листа открывается ДО вычисления метрик: из него читаются
-    # ручные значения (R «Долеты и Крот», кабинетные AVITO/Google).
+    # текущие значения ручных кабинетных колонок (AVITO/Google, доходные).
     ctx = None
     try:
         from sheets_writer import (
-            compute_cabinet_spend, extract_manual_values, open_sheet_context,
-            zayavki_value,
+            compute_cabinet_spend, open_sheet_context, zayavki_value,
         )
         ctx = open_sheet_context(config, day)
     except Exception as e:
@@ -521,23 +520,19 @@ def build_report(
     try:
         import metrics as metrics_mod
         from sheets_writer import (  # noqa: F811 — если импорт выше упал
-            compute_cabinet_spend, extract_manual_values, zayavki_value,
+            compute_cabinet_spend, zayavki_value,
         )
         from sheets_writer import manual_cabinet_entries
-        manual_values = extract_manual_values(ctx, config)
         spend, coeff_warnings, manual_cab_values = compute_cabinet_spend(ctx, config, result)
         income_labels = {e["label"] for e in
                          manual_cabinet_entries(config.get("google_sheets") or {})
                          if e["target"] == "prihod"}
         manual_income = sum(v for lbl, v in manual_cab_values.items()
                             if lbl in income_labels and v is not None)
-        from sheets_writer import disabled_metrics
         values, meta = metrics_mod.compute_metrics(
-            result, float(zayavki_value(config, result)), spend, manual_values,
+            result, float(zayavki_value(config, result)), spend,
             manual_income=manual_income,
-            disabled=disabled_metrics(config.get("google_sheets") or {}),
         )
-        meta["manual_values"] = manual_values
         meta["manual_cabinets"] = manual_cab_values
         if coeff_warnings:
             meta["coeff_warnings"] = coeff_warnings

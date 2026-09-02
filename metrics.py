@@ -1,15 +1,14 @@
 """Семантический реестр метрик: единый источник правды для расчётов и Sheets.
 
-Метрики бывают трёх видов:
+Метрики бывают двух видов:
 - **base_service** — запрашиваемые: собираются из сервисов (LeadsTech, Метрика,
   8connect) в core.build_report; `source` — путь в отчёте ("leadstech.clicks")
   или спец-ключ ("metrika.goal"); `literal` — фиксированное значение
   (sms_clients = 0 по требованию).
-- **base_manual** — вводятся людьми прямо в таблице (R «Долеты и Крот»);
-  бэкенд читает значение обратно из строки листа и никогда не перезаписывает.
-  Ручные колонки кабинетной зоны (AVITO, Google) в реестре НЕ живут — они
-  описываются в конфиге бренда `google_sheets.manual_cabinets` и входят в
-  cabinet_spend с коэффициентом 1.
+- Ручные колонки кабинетной зоны (AVITO, Google, доходные вроде «Крота»)
+  в реестре НЕ живут — они описываются в конфиге бренда
+  `google_sheets.manual_cabinets` и входят в cabinet_spend с коэффициентом 1
+  (target=zatraty) или в manual_income (target=prihod).
 - **computed** — считаются по `expr` (мини-DSL, синтаксис Python: + - * /,
   скобки, имена метрик, числа). Одно выражение интерпретируется дважды:
   бэкендом (eval_metrics: None-семантика, деление на 0 → None) и генератором
@@ -18,9 +17,9 @@
   в таблице возможен #DIV/0!, у бэкенда в этой ситуации None.
 
 Оцифровано с эталонной таблицы бренда osnovnoy «Кубыха» (лист «Август 26»).
-Колонки AN..AQ эталона (AN=дубль AL, AP=AO*72, AQ=AP/J) признаны мусором и
-не переносятся; формула =IFERROR(W/J) в колонке R старых строк — баг, R
-всегда чисто ручной ввод.
+Служебные колонки эталона после «Маржи с клика» признаны мусором и не
+переносятся. Колонки «бекендер» (N) и «Долеты и Крот» (R) эталона удалены
+2026-09-02 — layout сдвинут на две колонки влево (A..AK).
 
 Псевдопеременная `cabinet_spend` (Σ spent_кабинета × коэффициент + ручные
 кабинетные колонки × 1) не является метрикой реестра: бэкенд получает её
@@ -43,19 +42,12 @@ CABINET_SPEND = "cabinet_spend"  # псевдопеременная, подст�
 MANUAL_INCOME = "manual_income"
 _PSEUDO_VARS = {CABINET_SPEND, MANUAL_INCOME}
 
-# Метрики, которые можно отключить per-brand (`google_sheets.disabled_metrics`).
-# Отключённая метрика: не читается из листа, слагаемое с ней исчезает из
-# A1-формул (элизия), зависимые формулы с ней в множителе/делителе не пишутся,
-# в бэкенд-расчёте участвует как 0. По умолчанию все включены.
-OPTIONAL_METRICS = {"dolety"}
-
-
 @dataclass(frozen=True)
 class Metric:
     key: str
     col: Optional[str]            # каноническая буква layout; None = скрытая
     label: Optional[str]          # подпись строки 2; None у скрытых
-    kind: str                     # "date" | "base_service" | "base_manual" | "computed"
+    kind: str                     # "date" | "base_service" | "computed"
     occurrence: int = 1           # вхождение подписи слева направо (дубли)
     source: Optional[str] = None  # base_service: путь в отчёте / "metrika.goal"
     expr: Optional[str] = None    # computed: мини-DSL
@@ -69,7 +61,7 @@ def _m(*args, **kwargs) -> Tuple[str, Metric]:
     return m.key, m
 
 
-# Порядок вставки = канонический layout листа (A..AM), скрытые — в конце.
+# Порядок вставки = канонический layout листа (A..AK), скрытые — в конце.
 METRICS: Dict[str, Metric] = dict([
     _m("date", "A", "Дата", "date",
        description="Дата строки, dd.mm.yyyy"),
@@ -99,65 +91,61 @@ METRICS: Dict[str, Metric] = dict([
        description="Покупка: Затраты / клик"),
     _m("prodazha", "M", "Продажа", "computed", expr="vitrina / klik",
        description="Продажа: Витрина / клик"),
-    _m("bekender", "N", "бекендер", "computed", expr="dolety / obshchee",
-       description="бекендер: Долеты / Общее"),
-    _m("sms_share", "O", "SMS", "computed", expr="sms_chistye / obshchee",
+    _m("sms_share", "N", "SMS", "computed", expr="sms_chistye / obshchee",
        description="SMS на заявку: SMS чистые / Общее"),
-    _m("api_share", "P", "API", "computed", expr="api_dohod / obshchee",
+    _m("api_share", "O", "API", "computed", expr="api_dohod / obshchee",
        occurrence=1,
        description="API на заявку: API / Общее"),
-    _m("dohod_na_zayavku", "Q", "Доход на заявку", "computed", expr="vitrina / obshchee",
+    _m("dohod_na_zayavku", "P", "Доход на заявку", "computed", expr="vitrina / obshchee",
        description="Доход на заявку: Витрина / Общее"),
-    _m("dolety", "R", "Долеты и Крот", "base_manual",
-       description="«Долеты и Крот» — вводится руками в таблице; только операнд «бекендера», в «Приход» не входит"),
-    _m("sms_chistye", "S", "SMS чистые", "computed", expr="sms_charge - sms_cost",
+    _m("sms_chistye", "Q", "SMS чистые", "computed", expr="sms_charge - sms_cost",
        description="SMS чистые: Приход СМС − Расход СМС"),
-    _m("prihody_sms", "T", "приходы смс", "computed", expr="sms_charge",
+    _m("prihody_sms", "R", "приходы смс", "computed", expr="sms_charge",
        description="приходы смс = Приход СМС (алиас)"),
-    _m("api_dohod", "U", "API", "computed", expr="vsego", occurrence=2,
-       description="API: Всего (=AH)"),
-    _m("vitrina", "V", "Витрина", "computed", expr="itogo",
+    _m("api_dohod", "S", "API", "computed", expr="vsego", occurrence=2,
+       description="API: Всего (=AF)"),
+    _m("vitrina", "T", "Витрина", "computed", expr="itogo",
        description="Витрина = Итого витрина+СМС+АПИ (алиас)"),
-    _m("adfox", "W", "Adfox", "computed", expr="itogo",
-       description="Adfox = Итого (в эталоне ссылалось на AL через мусорную AN)"),
-    _m("epc", "X", "EPC", "computed", expr="prihod / clicks_lt",
+    _m("adfox", "U", "Adfox", "computed", expr="itogo",
+       description="Adfox = Итого (алиас)"),
+    _m("epc", "V", "EPC", "computed", expr="prihod / clicks_lt",
        description="EPC: Приход / Клики лт"),
-    _m("pokupka_s_lida", "Y", "Покупка с лида", "computed", expr="zatraty / obshchee",
+    _m("pokupka_s_lida", "W", "Покупка с лида", "computed", expr="zatraty / obshchee",
        description="Покупка с лида: Затраты / Общее"),
-    _m("prodazha_s_lida", "Z", "Продажа с лида", "computed", expr="prihod / obshchee",
+    _m("prodazha_s_lida", "X", "Продажа с лида", "computed", expr="prihod / obshchee",
        description="Продажа с лида: Приход / Общее"),
-    _m("roi", "AA", "ROI", "computed", expr="chistaya / zatraty",
+    _m("roi", "Y", "ROI", "computed", expr="chistaya / zatraty",
        description="ROI: Чистая / Затраты"),
-    _m("sms_count", "AB", "кол-во смсок", "base_service", source="eightconnect.count",
+    _m("sms_count", "Z", "кол-во смсок", "base_service", source="eightconnect.count",
        description="8connect: количество отправленных SMS"),
-    _m("sms_cost", "AC", "Расход", "base_service", source="eightconnect.cost",
+    _m("sms_cost", "AA", "Расход", "base_service", source="eightconnect.cost",
        description="8connect: расход на рассылку"),
-    _m("chistye", "AD", "Чистые", "computed", expr="sms_charge - sms_cost",
-       description="Чистые СМС: Приход СМС − Расход СМС (дубль S; AG ссылается сюда)"),
-    _m("sms_charge", "AE", "Приход", "base_service", source="eightconnect.charge",
+    _m("chistye", "AB", "Чистые", "computed", expr="sms_charge - sms_cost",
+       description="Чистые СМС: Приход СМС − Расход СМС (дубль Q; AE ссылается сюда)"),
+    _m("sms_charge", "AC", "Приход", "base_service", source="eightconnect.charge",
        occurrence=2,
        description="8connect: доход с рассылки"),
-    _m("sms_clients", "AF", "Клиенты", "base_service", literal=0,
+    _m("sms_clients", "AD", "Клиенты", "base_service", literal=0,
        description="Клиенты: всегда 0 (по требованию); в «Приход» не входит"),
-    _m("roi_sms", "AG", "ROI SMS", "computed", expr="chistye / sms_cost",
+    _m("roi_sms", "AE", "ROI SMS", "computed", expr="chistye / sms_cost",
        description="ROI SMS: Чистые / Расход СМС"),
-    _m("vsego", "AH", "Всего", "computed", expr="sms_clients * 1",
+    _m("vsego", "AF", "Всего", "computed", expr="sms_clients * 1",
        description="Всего: Клиенты × 1"),
-    _m("perehody", "AI", "Переходы Уники", "base_service", source="leadstech.hosts",
+    _m("perehody", "AG", "Переходы Уники", "base_service", source="leadstech.hosts",
        description="LeadsTech: уникальные хосты по sub1"),
-    _m("dohod_vitrina", "AJ", "Доход с витрины", "computed",
+    _m("dohod_vitrina", "AH", "Доход с витрины", "computed",
        expr="lt_sumwebmaster - sms_charge",
        description="Доход с витрины: доход вебмастера LeadsTech − Приход СМС"),
-    _m("dohod_s_unika", "AK", "Доход с одного уника", "computed", expr="itogo / perehody",
+    _m("dohod_s_unika", "AI", "Доход с одного уника", "computed", expr="itogo / perehody",
        description="Доход с одного уника: Итого / Переходы Уники"),
-    _m("itogo", "AL", "Итого витрина + СМС + АПИ", "computed",
+    _m("itogo", "AJ", "Итого витрина + СМС + АПИ", "computed",
        expr="sms_charge + dohod_vitrina + api_dohod",
        description="Итого: Приход СМС + Доход с витрины + API"),
-    _m("marzha_s_klika", "AM", "Маржа с клика", "computed",
+    _m("marzha_s_klika", "AK", "Маржа с клика", "computed",
        expr="(chistaya - sms_cost) / klik",
        description="Маржа с клика: (Чистая − Расход СМС) / клик"),
     # Скрытая базовая: не имеет колонки, в A1-формулах инлайнится литералом
-    # (как сейчас `=681266,48-AE13` в живой таблице).
+    # (например `=681266,48-AC13`).
     _m("lt_sumwebmaster", None, None, "base_service", source="leadstech.sum",
        description="LeadsTech: доход вебмастера (sumwebmaster) — операнд «Прихода» и «Дохода с витрины»"),
 ])
@@ -303,16 +291,13 @@ def _get_path(report: Dict[str, Any], path: str) -> Optional[float]:
 def base_env(
     report: Dict[str, Any],
     goal_value: Optional[float],
-    manual_values: Optional[Dict[str, Optional[float]]] = None,
 ) -> Dict[str, Optional[float]]:
     """Значения базовых метрик из отчёта build_report.
 
     `goal_value` — число цели Метрики (логика выбора цели живёт в
     sheets_writer._find_goal_value, сюда приходит готовое число).
-    `manual_values` — ручные метрики, прочитанные из листа ({key: значение}).
     """
     env: Dict[str, Optional[float]] = {}
-    manual_values = manual_values or {}
     for key, m in METRICS.items():
         if m.kind == "base_service":
             if m.literal is not None:
@@ -321,8 +306,6 @@ def base_env(
                 env[key] = goal_value
             else:
                 env[key] = _get_path(report, m.source or "")
-        elif m.kind == "base_manual":
-            env[key] = manual_values.get(key)
     return env
 
 
@@ -330,29 +313,19 @@ def compute_metrics(
     report: Dict[str, Any],
     goal_value: Optional[float],
     cabinet_spend: Optional[float],
-    manual_values: Optional[Dict[str, Optional[float]]] = None,
     manual_income: Optional[float] = None,
-    disabled: Optional[set] = None,
 ) -> Tuple[Dict[str, Optional[float]], Dict[str, Any]]:
     """Вычисляет все метрики. Возвращает (values, meta).
 
-    Ручные метрики без значения участвуют в суммах как 0 (и попадают в
-    meta["assumed_zero"]), но в values остаются None — прозрачно видно,
-    что данных не было.
+    Неизвестный cabinet_spend (лист недоступен) участвует в суммах как 0 и
+    попадает в meta["assumed_zero"].
     """
-    env = base_env(report, goal_value, manual_values)
+    env = base_env(report, goal_value)
     env[CABINET_SPEND] = cabinet_spend
     env[MANUAL_INCOME] = float(manual_income or 0.0)
-    disabled = disabled or set()
-    for k in disabled:
-        env[k] = 0.0  # отключённая метрика участвует как 0, без warning'а
 
-    assumed_zero = [k for k, v in env.items()
-                    if v is None and METRICS.get(k) and METRICS[k].kind == "base_manual"
-                    and k not in disabled]
+    assumed_zero: List[str] = []
     calc_env = dict(env)
-    for k in assumed_zero:
-        calc_env[k] = 0.0
     if calc_env.get(CABINET_SPEND) is None:
         calc_env[CABINET_SPEND] = 0.0
         assumed_zero.append(CABINET_SPEND)
@@ -364,7 +337,7 @@ def compute_metrics(
     for key, m in METRICS.items():
         if m.kind == "date":
             continue
-        v = env.get(key) if m.kind == "base_manual" else calc_env.get(key)
+        v = calc_env.get(key)
         values[key] = round(v, 4) if isinstance(v, float) else v
     meta = {"assumed_zero": assumed_zero}
     return values, meta
@@ -395,7 +368,6 @@ class A1Context:
     literals: Dict[str, float]                  # скрытые метрики -> инлайн-значение
     cabinet_terms: List[Tuple[str, float]]      # [(буква, коэффициент)] для cabinet_spend
     income_terms: List[str] = None              # буквы доходных ручных полей (manual_income)
-    disabled: Optional[set] = None              # отключённые метрики (слагаемые выпадают)
 
 
 _PRECEDENCE = {ast.Add: 1, ast.Sub: 1, ast.Mult: 2, ast.Div: 2}
@@ -405,8 +377,6 @@ def _to_a1(node: ast.expr, ctx: A1Context, parent_prec: int = 0) -> str:
     if isinstance(node, ast.Constant):
         return _fmt_number(float(node.value))
     if isinstance(node, ast.Name):
-        if ctx.disabled and node.id in ctx.disabled:
-            return ""  # отключённая метрика: слагаемое исчезает (элизия в BinOp)
         if node.id == MANUAL_INCOME:
             terms = [f"{c}{ctx.row}" for c in (ctx.income_terms or [])]
             if not terms:
@@ -451,7 +421,7 @@ def _to_a1(node: ast.expr, ctx: A1Context, parent_prec: int = 0) -> str:
 def expr_to_a1(key: str, ctx: A1Context) -> Optional[str]:
     """A1-формула computed-метрики для строки ctx.row (с ведущим `=`).
 
-    None — формула выродилась (все значимые операнды отключены)."""
+    None — формула выродилась (например, только пустой manual_income)."""
     m = METRICS[key]
     if m.kind != "computed":
         raise ValueError(f"expr_to_a1: {key} не computed")
@@ -514,17 +484,17 @@ def human_formula(key: str, names_override: Optional[Dict[str, str]] = None) -> 
 # метрики, применённая к итоговой строке (коэффициенты пересчитываются от
 # сумм, а не суммируются); "avg_pos" — среднее по положительным значениям.
 # Отличия от эталона (осознанные): metrika_v суммируем (в эталоне F34 забыт),
-# кабинетные колонки суммируются ВСЕ (в эталоне — часть), мусорные AN..AQ нет.
+# кабинетные колонки суммируются ВСЕ (в эталоне — часть), служебных колонок нет.
 TOTALS: Dict[str, str] = {
     "chistaya": "sum", "prihod": "sum", "zatraty": "sum", "clicks_lt": "sum",
     "metrika_v": "sum", "zayavki": "sum", "obshchee": "sum", "klik": "sum",
-    "dolety": "sum", "sms_chistye": "sum", "prihody_sms": "sum",
+    "sms_chistye": "sum", "prihody_sms": "sum",
     "api_dohod": "sum", "vitrina": "sum", "adfox": "sum", "sms_count": "sum",
     "sms_cost": "sum", "chistye": "sum", "sms_charge": "sum",
     "sms_clients": "sum", "vsego": "sum", "perehody": "sum",
     "dohod_vitrina": "sum", "itogo": "sum",
     "cv_sayta": "expr", "cv_klik": "expr", "pokupka": "expr",
-    "prodazha": "expr", "bekender": "expr", "sms_share": "expr",
+    "prodazha": "expr", "sms_share": "expr",
     "api_share": "expr", "dohod_na_zayavku": "expr",
     "pokupka_s_lida": "expr", "prodazha_s_lida": "expr", "roi": "expr",
     "dohod_s_unika": "expr",
@@ -545,8 +515,6 @@ def total_formula(key: str, ctx: A1Context, first_row: int, last_row: int) -> Op
     kind = TOTALS.get(key)
     if not kind:
         return None
-    if ctx.disabled and key in ctx.disabled:
-        return None
     col = ctx.colmap.get(key)
     if col is None:
         return None
@@ -562,10 +530,6 @@ def total_formula(key: str, ctx: A1Context, first_row: int, last_row: int) -> Op
 
 def computed_keys() -> List[str]:
     return [k for k, m in METRICS.items() if m.kind == "computed"]
-
-
-def manual_keys() -> List[str]:
-    return [k for k, m in METRICS.items() if m.kind == "base_manual"]
 
 
 def layout_columns() -> List[Tuple[str, Metric]]:

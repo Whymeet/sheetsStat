@@ -14,8 +14,8 @@
 sumwebmaster известен только в момент прогона, поэтому такие ячейки остаются
 пустыми и заполняются ежедневной записью (как и сейчас).
 
-Ручные колонки (base_manual: R «Долеты и Крот»; кабинетные manual_cabinets:
-AVITO, Google) получают подпись, но никаких формул/значений — их ведут люди.
+Ручные кабинетные колонки (manual_cabinets: AVITO, Google, доходные) получают
+подпись, но никаких формул/значений — их ведут люди.
 
 Вся запись значений — одним values-batch (квоты Sheets), заморозка строк —
 одним spreadsheets.batchUpdate.
@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import metrics as M
 from sheets_writer import (
     CABINET_START_COL, RU_MONTHS, _col_index, _col_letter, _norm, cabinet_bounds,
-    disabled_metrics, manual_cabinet_entries,
+    manual_cabinet_entries,
 )
 
 logger = logging.getLogger("sheetsstat.sheet_builder")
@@ -59,7 +59,7 @@ _HEADER_BG = {  # особые цвета подписей (дефолт — ж�
     "epc": _C_ORANGE, "roi": _C_BLUE,
 }
 _DATA_BG = {
-    "zatraty": _C_LGREY, "obshchee": _C_LGREY, "dolety": _C_LGREY,
+    "zatraty": _C_LGREY, "obshchee": _C_LGREY,
     "chistye": _C_LGREY, "dohod_s_unika": _C_LGREY, "roi_sms": _C_LGREY,
     "sms_cost": _C_LGREEN, "sms_charge": _C_LGREEN,
     "sms_clients": _C_LGREEN, "dohod_vitrina": _C_LGREEN,
@@ -70,7 +70,6 @@ _NUMBER_FMT = {  # дефолт — {"type": "NUMBER", "pattern": "#,##0"}
     "date": {"type": "DATE", "pattern": "dd.mm.yyyy"},
     "roi": {"type": "PERCENT", "pattern": "0.00%"},
     "roi_sms": {"type": "PERCENT", "pattern": "0%"},
-    "bekender": {"type": "NUMBER", "pattern": "#,##0.00"},
     "sms_share": {"type": "NUMBER", "pattern": "#,##0.00"},
     "api_share": {"type": "NUMBER", "pattern": "#,##0.00"},
     "dohod_na_zayavku": {"type": "NUMBER", "pattern": "#,##0.00"},
@@ -78,7 +77,7 @@ _NUMBER_FMT = {  # дефолт — {"type": "NUMBER", "pattern": "#,##0"}
 }
 _COL_WIDTH = {  # px из эталона; отсутствующие агрегаты — 100
     "date": 75, "chistaya": 72, "zatraty": 102, "metrika_v": 123,
-    "zayavki": 106, "dohod_na_zayavku": 115, "dolety": 246, "sms_chistye": 131,
+    "zayavki": 106, "dohod_na_zayavku": 115, "sms_chistye": 131,
     "pokupka_s_lida": 108, "prodazha_s_lida": 113, "perehody": 170,
     "dohod_vitrina": 121, "dohod_s_unika": 150, "itogo": 211,
     "marzha_s_klika": 159,
@@ -211,7 +210,7 @@ def _formula_keys() -> List[str]:
 
 def _cabinet_layout(config: Dict[str, Any], extra_cabinets: Optional[List[str]] = None,
                     ) -> List[Tuple[str, str, float, bool]]:
-    """[(буква, имя, коэффициент, is_manual)] кабинетной зоны от AR.
+    """[(буква, имя, коэффициент, is_manual)] кабинетной зоны (от cabinet_bounds, дефолт AP).
 
     Имена: google_sheets.cabinets из конфига + кабинеты текущего отчёта
     (extra_cabinets) + manual_cabinets в конце. Коэффициенты — из
@@ -264,7 +263,7 @@ def build_month_grid(
     labels_override = gs_cfg.get("column_labels") or {}
     cabinets = _cabinet_layout(config, extra_cabinets)
 
-    layout = M.layout_columns()  # [(буква, метрика)] A..AM
+    layout = M.layout_columns()  # [(буква, метрика)] A..AK
     agg_end_idx = max(_col_index(c) for c, _ in layout)
     width = max(
         _col_index(cabinets[-1][0]) if cabinets else cabinet_bounds(config)[0],
@@ -285,12 +284,8 @@ def build_month_grid(
         row1[_col_index(col) - 1] = "" if is_manual else _coeff_cell(k)
 
     # Строка 2: подписи метрик (с оверрайдами бренда) + имена кабинетов.
-    # Отключённые метрики остаются пустой колонкой (позиции не сдвигаются).
-    dset = disabled_metrics(gs_cfg)
     row2 = blank_row()
     for col, m in layout:
-        if m.key in dset:
-            continue
         row2[_col_index(col) - 1] = labels_override.get(m.key) or m.label or ""
     for col, name, _k, _man in cabinets:
         row2[_col_index(col) - 1] = name
@@ -311,8 +306,7 @@ def build_month_grid(
         row = blank_row()
         row[0] = f"{dnum:02d}.{day.month:02d}.{day.year}"
         ctx = M.A1Context(colmap=colmap, row=rownum, literals={},
-                          cabinet_terms=cabinet_terms, income_terms=income_terms,
-                          disabled=dset)
+                          cabinet_terms=cabinet_terms, income_terms=income_terms)
         for key in formula_keys:
             f = M.expr_to_a1(key, ctx)
             if f:
@@ -325,8 +319,7 @@ def build_month_grid(
     totals_row = last_row + 1
     trow = blank_row()
     t_ctx = M.A1Context(colmap=colmap, row=totals_row, literals={},
-                        cabinet_terms=cabinet_terms, income_terms=income_terms,
-                        disabled=dset)
+                        cabinet_terms=cabinet_terms, income_terms=income_terms)
     for _col, m in layout:
         f = M.total_formula(m.key, t_ctx, first_row, last_row)
         if f:

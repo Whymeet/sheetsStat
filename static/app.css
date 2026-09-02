@@ -463,10 +463,10 @@ details[open] summary { color: var(--text); }
   letter-spacing: .08em; color: var(--muted);
 }
 /* кнопки строк появляются при наведении */
-#columns-table [data-opt-off], #columns-table [data-mc-del] {
+#columns-table [data-mc-del] {
   opacity: 0; transition: opacity .12s;
 }
-#columns-table tr:hover [data-opt-off], #columns-table tr:hover [data-mc-del] { opacity: 1; }
+#columns-table tr:hover [data-mc-del] { opacity: 1; }
 
 /* ===== Липкая панель сохранения: кнопка всегда на экране ===== */
 .save-bar {

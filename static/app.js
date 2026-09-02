@@ -1133,7 +1133,6 @@ document.getElementById("save-config").addEventListener("click", async () => {
       // чтобы сохранение настроек их не затёрло
       column_labels: _cfgState?.google_sheets?.column_labels || {},
       metric_names: _cfgState?.google_sheets?.metric_names || {},
-      disabled_metrics: _cfgState?.google_sheets?.disabled_metrics || [],
       managed_formulas: !!_cfgState?.google_sheets?.managed_formulas,
       auto_create_tab: !!_cfgState?.google_sheets?.auto_create_tab,
       cabinet_coeffs: _cfgState?.google_sheets?.cabinet_coeffs || {},
@@ -1189,7 +1188,6 @@ async function renderReportMetrics(data) {
   const fmt = v => v === null || v === undefined ? "—"
     : (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString("ru-RU") : (+v.toFixed(2)).toLocaleString("ru-RU"));
   const cells = (schema || [])
-    .filter(c => !c.disabled)
     .filter(c => (c.kind !== "date" && c.key in m) || c.kind === "manual_cabinet")
     .map(c => {
       const v = c.kind === "manual_cabinet" ? manualVals[c.label] : m[c.key];
@@ -1244,7 +1242,7 @@ let _columnsSchema = null;   // [{key, kind, col, label, occurrence, formula, de
 
 const KIND_TITLES = {
   base_service: "Запрашиваемые (собираются из сервисов)",
-  base_manual: "Ручные (вводятся в таблице, бэкенд читает)",
+  base_manual: "Ручные поля (вводятся в таблице в зоне кабинетов, бэкенд читает)",
   computed: "Вычисляемые (формулы; правятся в metrics.py)",
 };
 
@@ -1271,7 +1269,6 @@ async function loadColumnsTab() {
     const r = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/config`);
     if (!r.ok) throw new Error("не удалось прочитать конфиг бренда");
     const cfg = await r.json();
-    _disabledMetrics = new Set(cfg?.google_sheets?.disabled_metrics || []);
     document.getElementById("gs-cab-start").value = cfg?.google_sheets?.cabinet_start_col ?? "";
     document.getElementById("gs-cab-end").value = cfg?.google_sheets?.cabinet_max_col ?? "";
     renderColumnsTable(cfg?.google_sheets?.column_labels || {},
@@ -1280,19 +1277,6 @@ async function loadColumnsTab() {
     status.textContent = "❌ " + e.message;
     status.className = "status err";
   }
-}
-
-let _disabledMetrics = new Set();  // локальный state вкладки до сохранения
-
-function loadColumnsTabRerender(key, disable) {
-  if (disable) _disabledMetrics.add(key); else _disabledMetrics.delete(key);
-  // перерисовать по текущей схеме с локальным состоянием
-  _columnsSchema = _columnsSchema.map(c =>
-    c.key === key ? { ...c, disabled: disable } : c);
-  const overrides = {}; const names = {};
-  document.querySelectorAll("#columns-table [data-col-key]").forEach(i => { if (i.value.trim()) overrides[i.dataset.colKey] = i.value.trim(); });
-  document.querySelectorAll("#columns-table [data-name-key]").forEach(i => { if (i.value.trim()) names[i.dataset.nameKey] = i.value.trim(); });
-  renderColumnsTable(overrides, names);
 }
 
 const KIND_BADGES = {
@@ -1337,25 +1321,6 @@ function renderColumnsTable(overrides, nameOverrides) {
     tbody.appendChild(trh);
     group.forEach(c => {
       const tr = document.createElement("tr");
-      if (c.optional && c.disabled) {
-        // отключённая опциональная метрика: серым, с кнопкой возврата
-        tr.dataset.optKey = c.key;
-        tr.dataset.optDisabled = "1";
-        tr.innerHTML = `
-          <td class="col-letter">${escapeHtml(c.col || "—")}</td>
-          <td colspan="4" class="desc" style="font-style: italic;">
-            «${escapeHtml(c.label || c.key)}» отключена — не читается и выпала из формул
-          </td>
-          <td>
-            <button type="button" class="secondary sm" data-opt-on>вернуть</button>
-          </td>`;
-        tr.querySelector("[data-opt-on]").addEventListener("click", () => {
-          tr.dataset.optDisabled = "";
-          loadColumnsTabRerender(c.key, false);
-        });
-        tbody.appendChild(tr);
-        return;
-      }
       const occHint = c.occurrence > 1 ? ` <span style="color:var(--muted); font-size:11px;">(${c.occurrence}-е вхожд.)</span>` : "";
       const what = c.kind === "computed" ? (c.formula || "") : (c.source || (c.kind === "base_manual" ? "ручной ввод в таблице" : ""));
       const labelOvr = overrides[c.key] || "";
@@ -1368,19 +1333,13 @@ function renderColumnsTable(overrides, nameOverrides) {
       const nameCell = `<input type="text" class="inp-sys${nameOvr ? " overridden" : ""}"
                   data-name-key="${escapeHtml(c.key)}" value="${escapeHtml(nameOvr)}"
                   placeholder="${escapeHtml(c.system_name_default || c.label || c.key)}">`;
-      const delBtn = c.optional
-        ? ` <button type="button" class="danger sm" data-opt-off="${escapeHtml(c.key)}"
-              title="Отключить метрику для этого бренда (колонку в листе не трогает)">✕</button>`
-        : "";
       tr.innerHTML = `
         <td class="col-letter">${escapeHtml(c.col || "—")}</td>
         <td>${labelCell}</td>
         <td class="zone-split">${nameCell}</td>
         <td>${KIND_BADGES[c.kind] || ""}</td>
         <td class="formula-cell">${escapeHtml(what)}</td>
-        <td class="desc">${escapeHtml(c.description || "")}${delBtn}</td>`;
-      const off = tr.querySelector("[data-opt-off]");
-      if (off) off.addEventListener("click", () => loadColumnsTabRerender(c.key, true));
+        <td class="desc">${escapeHtml(c.description || "")}</td>`;
       tbody.appendChild(tr);
     });
 
@@ -1451,7 +1410,6 @@ document.getElementById("columns-save").addEventListener("click", async () => {
     cfg.google_sheets.column_labels = labels;
     cfg.google_sheets.metric_names = names;
     cfg.google_sheets.manual_cabinets = manualCabinets;
-    cfg.google_sheets.disabled_metrics = Array.from(_disabledMetrics);
     cfg.google_sheets.cabinet_start_col = document.getElementById("gs-cab-start").value.trim().toUpperCase();
     cfg.google_sheets.cabinet_max_col = document.getElementById("gs-cab-end").value.trim().toUpperCase();
     const w = await fetch(`/api/profiles/${encodeURIComponent(_activeProfileId)}/config`, {
