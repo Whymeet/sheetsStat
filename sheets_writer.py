@@ -11,13 +11,13 @@
 переопределяются в конфиге: `google_sheets.column_labels: {key: "подпись"}`.
 
 Метрики реестра (легаси-раскладка в скобках — только исторический default):
-    prihod        (C)  — формула `=<sms_charge>+<dohod_vitrina>+<sms_clients>+<dolety>`
+    prihod        (C)  — формула `=<dohod_vitrina>` (+ доходные ручные поля)
     zatraty       (D)  — формула Σ(расход_i * коэф_i) + <sms_cost>
     clicks_lt     (E)  — leadstech.clicks
     metrika_v     (F)  — yandex_metrika.visits
     zayavki       (G)  — Достижения/Целевые визиты цели бренда
                          (yandex_metrika.zayavki_metric: reaches|visits)
-    dolety        (R)  — не пишется, только операнд формулы prihod
+    dolety        (R)  — не пишется, ручная колонка (операнд «бекендера»)
     sms_count     (AB) — eightconnect.count (кол-во отправленных SMS)
     sms_cost      (AC) — eightconnect.cost
     sms_charge    (AE) — eightconnect.charge
@@ -75,7 +75,7 @@ AGG_COLUMNS: Dict[str, Tuple[str, int, str]] = {
     "clicks_lt":     ("Клики лт",        1, "E"),
     "metrika_v":     ("Метрика визиты",  1, "F"),
     "zayavki":       ("Заявки с сайта",  1, "G"),
-    "dolety":        ("Долеты и Крот",   1, "R"),   # только операнд формулы prihod
+    "dolety":        ("Долеты и Крот",   1, "R"),   # ручная, не пишется
     "sms_count":     ("кол-во смсок",    1, "AB"),
     "sms_cost":      ("Расход",          1, "AC"),
     "sms_charge":    ("Приход",          2, "AE"),  # дубль «Приход» — 2-е вхождение (блок СМС)
@@ -87,16 +87,16 @@ AGG_COLUMNS: Dict[str, Tuple[str, int, str]] = {
 # Семантика метрик — что именно пишется в колонку. Показывается во вкладке
 # «Колонки» UI рядом с редактируемой подписью (GET /api/sheets/columns).
 AGG_COLUMN_DESCRIPTIONS: Dict[str, str] = {
-    "prihod":        "Формула: Приход СМС + Доход с витрины + Клиенты + Долеты",
+    "prihod":        "Формула: Доход с витрины + Σ ручных доходных полей",
     "zatraty":       "Формула: Расход СМС + Σ(кабинет × коэффициент из строки 1)",
     "clicks_lt":     "LeadsTech: уники (uniques) по sub1, сумма по всем аккаунтам",
     "metrika_v":     "Яндекс.Метрика: визиты счётчика за день",
     "zayavki":       "Яндекс.Метрика: число цели «Zayvka» (или первой цели бренда)",
-    "dolety":        "Ведётся руками, мы не пишем — только операнд формулы «Приход»",
+    "dolety":        "Ведётся руками, мы не пишем — операнд «бекендера», в «Приход» не входит",
     "sms_count":     "8connect: количество отправленных SMS (count)",
     "sms_cost":      "8connect: расход на рассылку (cost)",
     "sms_charge":    "8connect: доход с рассылки (charge)",
-    "sms_clients":   "Всегда пишется 0 (по требованию)",
+    "sms_clients":   "Всегда пишется 0 (по требованию); в «Приход» не входит",
     "perehody":      "LeadsTech: уникальные хосты (hosts) по sub1",
     "dohod_vitrina": "Формула: доход вебмастера LeadsTech (sumwebmaster) − Приход СМС",
 }
@@ -404,18 +404,14 @@ def _substitute_template_row(formula: str, target_row: int) -> str:
 
 
 def _build_prihod_formula(row: int, cols: Dict[str, str],
-                          income_cols: Optional[List[str]] = None,
-                          skip: Optional[List[str]] = None) -> str:
-    """Формула «Приход»: `=<sms_charge>+<dohod_vitrina>+<sms_clients>+<dolety>`
-    (+ колонки доходных ручных полей; `skip` — колонки отключённых метрик).
+                          income_cols: Optional[List[str]] = None) -> str:
+    """Формула «Приход»: `=<dohod_vitrina>` + колонки доходных ручных полей
+    (target="prihod"). Приход СМС, «Клиенты» и «Долеты и Крот» в приход не
+    входят (решение пользователя, 2026-09-02).
 
-    Вызывающий код обязан проверить, что нужные операнды есть в `cols`.
+    Вызывающий код обязан проверить, что `dohod_vitrina` есть в `cols`.
     """
-    parts = [cols["sms_charge"], cols["dohod_vitrina"], cols["sms_clients"]]
-    if "dolety" in cols:
-        parts.append(cols["dolety"])
-    parts = [c for c in parts if c not in set(skip or [])]
-    base = "=" + "+".join(f"{c}{row}" for c in parts)
+    base = f"={cols['dohod_vitrina']}{row}"
     for col in income_cols or []:
         base += f"+{col}{row}"
     return base
@@ -1002,12 +998,8 @@ def write_daily_report(
         # Legacy: три формулы как раньше, остальные колонки — клон строки 33.
         _add_formula("dohod_vitrina", ("sms_charge",),
                      lambda: _build_dohod_vitrina_formula(date_row, fixed["prihod"], cols))
-        prihod_ops = tuple(k for k in ("sms_charge", "dohod_vitrina", "sms_clients", "dolety")
-                           if k not in dset)
-        _add_formula("prihod", prihod_ops,
-                     lambda: _build_prihod_formula(
-                         date_row, cols, income_cols,
-                         skip=[cols[k] for k in ("dolety",) if k in dset and k in cols]))
+        _add_formula("prihod", ("dohod_vitrina",),
+                     lambda: _build_prihod_formula(date_row, cols, income_cols))
         _add_formula("zatraty", ZATRATY_PLAIN_KEYS,
                      lambda: _build_zatraty_formula(
                          date_row, coeffs_map, [cols[k] for k in ZATRATY_PLAIN_KEYS]))

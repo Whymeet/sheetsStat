@@ -37,8 +37,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 CABINET_SPEND = "cabinet_spend"  # псевдопеременная, подставляется извне
-# Σ значений ручных полей с target="prihod" (доходные, как «Долеты», но
-# динамические). Пусто/нет полей → слагаемое исчезает из A1-формулы и = 0
+# Σ значений ручных полей с target="prihod" (доходные, например «Крот»).
+# Пусто/нет полей → слагаемое исчезает из A1-формулы и = 0
 # в расчёте — формулы брендов без таких полей не меняются.
 MANUAL_INCOME = "manual_income"
 _PSEUDO_VARS = {CABINET_SPEND, MANUAL_INCOME}
@@ -76,8 +76,8 @@ METRICS: Dict[str, Metric] = dict([
     _m("chistaya", "B", "Чистая", "computed", expr="prihod - zatraty",
        description="Чистая прибыль: Приход − Затраты"),
     _m("prihod", "C", "Приход", "computed",
-       expr="sms_charge + dohod_vitrina + sms_clients + dolety + manual_income",
-       description="Приход: Приход СМС + Доход с витрины + Клиенты + Долеты"),
+       expr="dohod_vitrina + manual_income",
+       description="Приход: Доход с витрины + Σ ручных доходных полей (target=prihod)"),
     _m("zatraty", "D", "Затраты", "computed",
        expr="sms_cost + cabinet_spend",
        description="Затраты: Расход СМС + Σ(расход кабинета × коэффициент)"),
@@ -109,7 +109,7 @@ METRICS: Dict[str, Metric] = dict([
     _m("dohod_na_zayavku", "Q", "Доход на заявку", "computed", expr="vitrina / obshchee",
        description="Доход на заявку: Витрина / Общее"),
     _m("dolety", "R", "Долеты и Крот", "base_manual",
-       description="Доход от «Долетов и Крота» — вводится руками в таблице"),
+       description="«Долеты и Крот» — вводится руками в таблице; только операнд «бекендера», в «Приход» не входит"),
     _m("sms_chistye", "S", "SMS чистые", "computed", expr="sms_charge - sms_cost",
        description="SMS чистые: Приход СМС − Расход СМС"),
     _m("prihody_sms", "T", "приходы смс", "computed", expr="sms_charge",
@@ -138,7 +138,7 @@ METRICS: Dict[str, Metric] = dict([
        occurrence=2,
        description="8connect: доход с рассылки"),
     _m("sms_clients", "AF", "Клиенты", "base_service", literal=0,
-       description="Клиенты: всегда 0 (по требованию)"),
+       description="Клиенты: всегда 0 (по требованию); в «Приход» не входит"),
     _m("roi_sms", "AG", "ROI SMS", "computed", expr="chistye / sms_cost",
        description="ROI SMS: Чистые / Расход СМС"),
     _m("vsego", "AH", "Всего", "computed", expr="sms_clients * 1",

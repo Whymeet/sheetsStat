@@ -502,8 +502,8 @@ class GoogleSheetsSettings(BaseModel):
         return out
     share_with: List[str] = []
     # Отключённые опциональные метрики (metrics.OPTIONAL_METRICS): например
-    # "dolety" — тогда слагаемое выпадает из формулы «Прихода», значение не
-    # читается, зависимые формулы (бекендер) не пишутся. Мусор отбрасывается.
+    # "dolety" — тогда значение не читается, зависимые формулы (бекендер)
+    # не пишутся. Мусор отбрасывается.
     disabled_metrics: List[str] = []
 
     @field_validator("disabled_metrics", mode="before")
