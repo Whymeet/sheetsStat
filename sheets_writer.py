@@ -48,6 +48,7 @@ JSON-отчёте и в счётчике `unmatched`. Коэффициент к�
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import os
 import re
@@ -336,14 +337,40 @@ def _find_goal_value(yandex_metrika: Dict[str, Any], goal_name: str, metric: str
     return _goal_num(goals[0], metric) if goals else 0
 
 
-def _pick_worksheet(spreadsheet: Any, day: date) -> Tuple[Optional[Any], str]:
-    """Вернуть (worksheet, title). Если не нашли — (None, искомое имя)."""
-    title = f"{RU_MONTHS[day.month - 1]} {day.year % 100:02d}"
+def month_title(day: date) -> str:
+    """Каноническое имя месячной вкладки: «Сентябрь 26»."""
+    return f"{RU_MONTHS[day.month - 1]} {day.year % 100:02d}"
+
+
+def _norm_title(title: Any) -> str:
+    return " ".join(str(title or "").split()).lower()
+
+
+def find_month_worksheet(spreadsheet: Any, day: date) -> Optional[Any]:
+    """Вкладка месяца: сначала точное имя, затем без учёта регистра/пробелов
+    («май 26» ≡ «Май 26»). Иначе автосоздание плодило бы дубликаты вкладок
+    для старых месяцев, названных с маленькой буквы."""
+    title = month_title(day)
     try:
-        return spreadsheet.worksheet(title), title
+        return spreadsheet.worksheet(title)
     except Exception:
-        # Попробуем без ведущего нуля в году (редкий случай, year>=2100)
-        return None, title
+        pass
+    try:
+        wanted = _norm_title(title)
+        for ws in spreadsheet.worksheets():
+            if _norm_title(getattr(ws, "title", "")) == wanted:
+                return ws
+    except Exception as e:
+        logger.warning("Sheets: не удалось перечислить вкладки: %s", e)
+    return None
+
+
+def _pick_worksheet(spreadsheet: Any, day: date) -> Tuple[Optional[Any], str]:
+    """Вернуть (worksheet, фактический title). Если не нашли — (None, каноническое имя)."""
+    ws = find_month_worksheet(spreadsheet, day)
+    if ws is None:
+        return None, month_title(day)
+    return ws, str(getattr(ws, "title", None) or month_title(day))
 
 
 def _find_date_row(ws: Any, day: date) -> Optional[int]:
@@ -572,6 +599,7 @@ class SheetContext:
     ws: Any = None
     title: str = ""
     date_row: Optional[int] = None
+    created: bool = False  # вкладка месяца создана этим прогоном (sheet_builder)
     coeff_row: List[Any] = field(default_factory=list)
     label_row: List[Any] = field(default_factory=list)
     row_values: List[Any] = field(default_factory=list)  # окно строки даты (UNFORMATTED)
@@ -610,9 +638,10 @@ def open_sheet_context(
         try:
             import sheet_builder
             extra = [name for name, _s, _src in _collect_cabinets(report or {})]
-            ws, _created = sheet_builder.ensure_month_worksheet(
+            ws, ctx.created = sheet_builder.ensure_month_worksheet(
                 spreadsheet, day, config, extra_cabinets=extra,
             )
+            ctx.title = str(getattr(ws, "title", None) or title)
         except Exception as e:
             logger.error("Sheets/%s: автосоздание вкладки упало: %s", title, e,
                          exc_info=True)
@@ -871,8 +900,18 @@ def write_daily_report(
     # Шаблонные формулы из строки 33 (только legacy) — идут ПЕРВЫМИ; если наша
     # логика пишет в ту же колонку, последняя запись в batch_update перекроет
     # шаблон.
+    # Даты месяца живут в строках 3..2+N; строка 33 — дата только в 31-дневных
+    # месяцах. В сгенерированных вкладках коротких месяцев в 33 стоит ИТОГОВАЯ
+    # строка (SUM/AVERAGEIF) — клонировать её в строку даты нельзя (получались
+    # =SUM(B3:B32) в B3 и циклические ссылки). В старых ручных листах строка 33
+    # коротких месяцев пуста, так что поведение для них не меняется.
+    days_in_month = calendar.monthrange(day.year, day.month)[1]
+    last_date_row = 2 + days_in_month
     template: Dict[str, str] = {}
-    if not managed:
+    if not managed and TEMPLATE_ROW > last_date_row:
+        logger.info("Sheets/%s: строка %d за пределами дат месяца (3..%d) — шаблон не клонируется",
+                    title, TEMPLATE_ROW, last_date_row)
+    elif not managed:
         try:
             template = _load_template_formulas(ws, context.spreadsheet_id, title)
         except Exception as e:
@@ -891,6 +930,8 @@ def write_daily_report(
     cols, header_warnings = _resolve_agg_columns(
         label_row, gs_cfg.get("column_labels") or {}, cab_start_idx
     )
+    if context.created:
+        header_warnings.insert(0, f"вкладка {title!r} создана автоматически из реестра")
     if _norm(str(label_row[0] if label_row else "")) != "дата":
         header_warnings.append(
             "в A2 не «Дата» — проверь, что даты по-прежнему в столбце A"
@@ -1018,9 +1059,7 @@ def write_daily_report(
         # реестра переписываются каждый прогон: самовосстановление + новые
         # кабинетные колонки автоматически получают SUM. Реордер-устойчиво:
         # колонки резолвятся по подписям (reg_cols/coeffs_map).
-        import calendar
-        days_in_month = calendar.monthrange(day.year, day.month)[1]
-        first_data, last_data = 3, 2 + days_in_month  # даты в строках 3..2+N
+        first_data, last_data = 3, last_date_row  # даты в строках 3..2+N
         totals_row = last_data + 1
         if getattr(ws, "row_count", totals_row) < totals_row:
             header_warnings.append(

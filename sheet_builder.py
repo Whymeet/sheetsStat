@@ -30,8 +30,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import metrics as M
 from sheets_writer import (
     CABINET_START_COL, RU_MONTHS, _col_index, _col_letter, _norm, cabinet_bounds,
-    manual_cabinet_entries,
+    find_month_worksheet, manual_cabinet_entries,
 )
+from sheets_writer import month_title as _month_title
 
 logger = logging.getLogger("sheetsstat.sheet_builder")
 
@@ -39,7 +40,7 @@ FIRST_DATA_ROW = 3
 
 
 def month_title(day: date) -> str:
-    return f"{RU_MONTHS[day.month - 1]} {day.year % 100:02d}"
+    return _month_title(day)
 
 
 # ============ Оформление (оцифровано с эталонной вкладки «Июль 26») ============
@@ -336,12 +337,12 @@ def ensure_month_worksheet(
     config: Dict[str, Any],
     extra_cabinets: Optional[List[str]] = None,
 ) -> Tuple[Any, bool]:
-    """Возвращает (worksheet, created). Создаёт вкладку месяца, если её нет."""
+    """Возвращает (worksheet, created). Создаёт вкладку месяца, если её нет
+    (поиск без учёта регистра: «май 26» считается существующей «Май 26»)."""
     title = month_title(day)
-    try:
-        return spreadsheet.worksheet(title), False
-    except Exception:
-        pass
+    existing = find_month_worksheet(spreadsheet, day)
+    if existing is not None:
+        return existing, False
 
     grid, width = build_month_grid(config, day, extra_cabinets)
     rows = len(grid) + 5
