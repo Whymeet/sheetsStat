@@ -137,6 +137,25 @@ def upsert_profile(pid: str, cfg: Dict[str, Any]) -> None:
         )
 
 
+def promote_to_managed(pid: str) -> bool:
+    """Включает google_sheets.managed_formulas у профиля.
+
+    Дёргается после прогона, в котором вкладка месяца была создана
+    автоматически: сгенерированная вкладка живёт на формулах реестра, и дальше
+    бренд должен писать в managed-режиме. Возвращает True, если флаг изменился.
+    """
+    cfg = get_profile(pid)
+    if not cfg:
+        return False
+    gs = cfg.setdefault("google_sheets", {})
+    if gs.get("managed_formulas"):
+        return False
+    gs["managed_formulas"] = True
+    upsert_profile(pid, cfg)
+    logger.info("db: профиль %r переведён на managed_formulas после автосоздания вкладки", pid)
+    return True
+
+
 def delete_profile(pid: str) -> None:
     """Удаляет профиль. Его runs остаются — история переживает удаление бренда."""
     with _connect() as conn:

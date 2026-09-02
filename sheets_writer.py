@@ -889,7 +889,11 @@ def write_daily_report(
 
     # Managed-режим: формулы строки даты генерятся из реестра метрик
     # (metrics.py), шаблонная строка 33 не используется вовсе.
-    managed = bool(gs_cfg.get("managed_formulas"))
+    # Автосозданная вкладка всегда пишется в managed-режиме: формулы в ней и
+    # так из реестра, а legacy-клон строки 33 в сгенерированную вкладку —
+    # источник багов (итоговая строка в коротких месяцах). Флаг бренда затем
+    # переключает вызывающий код (app/scheduler → db.promote_to_managed).
+    managed = bool(gs_cfg.get("managed_formulas")) or bool(context.created)
 
     # Шаблонные формулы из строки 33 (только legacy) — идут ПЕРВЫМИ; если наша
     # логика пишет в ту же колонку, последняя запись в batch_update перекроет
@@ -925,7 +929,9 @@ def write_daily_report(
         label_row, gs_cfg.get("column_labels") or {}, cab_start_idx
     )
     if context.created:
-        header_warnings.insert(0, f"вкладка {title!r} создана автоматически из реестра")
+        header_warnings.insert(
+            0, f"вкладка {title!r} создана автоматически из реестра — "
+               "запись в managed-режиме, бренд переводится на managed")
     if _norm(str(label_row[0] if label_row else "")) != "дата":
         header_warnings.append(
             "в A2 не «Дата» — проверь, что даты по-прежнему в столбце A"
@@ -1119,6 +1125,8 @@ def write_daily_report(
         "enabled": True,
         "worksheet": title,
         "date_row": date_row,
+        "created": bool(context.created),
+        "managed": managed,
         "fixed": fixed,
         "matched": matched,
         "unmatched": unmatched_out,

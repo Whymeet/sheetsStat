@@ -257,6 +257,12 @@ class ReportScheduler:
                 "google_sheets_error": (report.get("google_sheets") or {}).get("error"),
             }
             logger.info("scheduler[%s]: профиль %r ok, date %s", label, pid, target_day)
+            if (report.get("google_sheets") or {}).get("created"):
+                try:
+                    db.promote_to_managed(pid)  # вкладка создана → бренд на managed
+                except Exception as e:
+                    logger.error("scheduler[%s]: promote_to_managed %r: %s", label, pid, e,
+                                 exc_info=True)
         except Exception as e:
             result = {
                 "profile_id": pid,

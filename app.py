@@ -1080,6 +1080,13 @@ def run_report(req: ReportRequest):
         _CANCEL_TOKENS.pop(token, None)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
+    # Вкладка месяца создана этим прогоном → бренд переводится на managed.
+    if (report.get("google_sheets") or {}).get("created"):
+        try:
+            db.promote_to_managed(req.profile_id)
+        except Exception as e:
+            logger.error("promote_to_managed %r: %s", req.profile_id, e, exc_info=True)
+
     # Если Ads Manager вернул 0 кабинетов — это warning, но ответ всё равно
     # сохраняем (удобно видеть, что LeadsTech всё равно отдал статистику).
     if report["cabinet_count"] == 0:
